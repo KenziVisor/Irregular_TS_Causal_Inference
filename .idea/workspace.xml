@@ -5,10 +5,8 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="518a3829-dd69-41b9-8d48-b6bf01057891" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/Irregular_TS_Causal_Inference.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/.name" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/.name" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/preprocess_physionet_2012.py" beforeDir="false" afterPath="$PROJECT_DIR$/preprocess_physionet_2012.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -39,6 +37,7 @@
   </component>
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
+    "Python.physionet2012_causal_graph.executor": "Run",
     "Python.preprocess_physionet_2012.executor": "Run",
     "Python.treatment_split.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
@@ -46,7 +45,29 @@
     "git-widget-placeholder": "pc"
   }
 }]]></component>
-  <component name="RunManager" selected="Python.treatment_split">
+  <component name="RunManager" selected="Python.physionet2012_causal_graph">
+    <configuration name="physionet2012_causal_graph" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="Irregular_TS_Causal_Inference" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/physionet2012_causal_graph.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
     <configuration name="preprocess_physionet_2012" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="Irregular_TS_Causal_Inference" />
       <option name="ENV_FILES" value="" />
@@ -93,6 +114,7 @@
     </configuration>
     <recent_temporary>
       <list>
+        <item itemvalue="Python.physionet2012_causal_graph" />
         <item itemvalue="Python.treatment_split" />
         <item itemvalue="Python.preprocess_physionet_2012" />
       </list>
