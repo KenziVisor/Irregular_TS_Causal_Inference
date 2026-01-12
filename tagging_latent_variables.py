@@ -254,13 +254,9 @@ def run_latent_tagging_pipeline(pkl_path, output_csv_path):
 latent_tags_df, decision_trees = run_latent_tagging_pipeline(pkl_path, output_csv_path)
 print(latent_tags_df.head())
 
-# Save tagged dataset as pickle
-with open(output_csv_path.replace(".csv", ".pkl"), "wb") as f:
-    pickle.dump(latent_tags_df, f)
 
 # Save decision trees dictionary
 with open(output_csv_path.replace(".csv", "_trees.pkl"), "wb") as f:
     pickle.dump(decision_trees, f)
 
-print(f"Tagged dataset pickle saved to: {output_csv_path.replace('.csv', '.pkl')}")
 print(f"Decision trees dictionary saved to: {output_csv_path.replace('.csv', '_trees.pkl')}")
