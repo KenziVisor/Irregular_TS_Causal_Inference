@@ -1,9 +1,10 @@
 import matplotlib.pyplot as plt
 import networkx as nx
 import os
+import pickle
 
 
-def create_physionet2012_causal_graph() -> nx.DiGraph:
+def create_physionet2012_causal_graph(save=0) -> nx.DiGraph:
     """
     Create a directed acyclic graph (DAG) representing a clinically-plausible
     causal structure for PhysioNet / CinC Challenge 2012 variables.
@@ -210,6 +211,14 @@ def create_physionet2012_causal_graph() -> nx.DiGraph:
     if not nx.is_directed_acyclic_graph(G):
         raise ValueError("Constructed graph is not a DAG")
 
+    if save:
+        filename_graph = "../data/causal_graph.pkl"
+        with open(filename_graph, "wb") as file:
+            pickle.dump(G, file)
+        if os.path.exists(filename_graph):
+            size = os.path.getsize(filename_graph)
+            if size > 0:
+                print(f"✅ File '{filename_graph}' exists and has size {size} bytes.")
     return G
 
 
@@ -358,5 +367,5 @@ def draw_graph(
         plt.show()
 
 
-g = create_physionet2012_causal_graph()
+g = create_physionet2012_causal_graph(save=1)
 draw_graph(g, save=1)
