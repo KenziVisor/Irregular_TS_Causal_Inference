@@ -240,6 +240,30 @@ def run_mortality_from_latents(
     print("\n[MLP]   VAL:", val_metrics_mlp)
     print("[MLP]   TEST:", test_metrics_mlp)
 
+        # =========================
+    # Save results to TXT
+    # =========================
+
+    results_txt_path = "mortality_prediction_results.txt"
+
+    with open(results_txt_path, "w") as f:
+        f.write("=== Mortality Prediction From Latent Variables ===\n\n")
+
+        f.write(f"Dataset size: {len(df)} patients\n")
+        f.write(f"Mortality rate: {y.mean():.4f}\n")
+        f.write(f"Number of latent features: {len(feat_cols)}\n\n")
+
+        f.write("----- Logistic Regression -----\n")
+        f.write(f"Validation metrics:\n{val_metrics_lr}\n\n")
+        f.write(f"Test metrics:\n{test_metrics_lr}\n\n")
+
+        f.write("----- MLP (Deep Learning) -----\n")
+        f.write(f"Validation metrics:\n{val_metrics_mlp}\n\n")
+        f.write(f"Test metrics:\n{test_metrics_mlp}\n\n")
+
+    print(f"\nResults saved to: {results_txt_path}")
+
+
     return {
         "df": df,
         "feature_cols": feat_cols,
