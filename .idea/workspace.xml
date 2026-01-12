@@ -6,7 +6,9 @@
   <component name="ChangeListManager">
     <list default="true" id="518a3829-dd69-41b9-8d48-b6bf01057891" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/.name" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/.name" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/Irregular_TS_Causal_Inference.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/Irregular_TS_Causal_Inference.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/physionet2012_causal_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/physionet2012_causal_graph.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -35,16 +37,16 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "Python.physionet2012_causal_graph.executor": "Run",
-    "Python.preprocess_physionet_2012.executor": "Run",
-    "Python.treatment_split.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "SHARE_PROJECT_CONFIGURATION_FILES": "true",
-    "git-widget-placeholder": "pc"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;Python.physionet2012_causal_graph.executor&quot;: &quot;Run&quot;,
+    &quot;Python.preprocess_physionet_2012.executor&quot;: &quot;Run&quot;,
+    &quot;Python.treatment_split.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;causal__graph&quot;
   }
-}]]></component>
+}</component>
   <component name="RunManager" selected="Python.physionet2012_causal_graph">
     <configuration name="physionet2012_causal_graph" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="Irregular_TS_Causal_Inference" />

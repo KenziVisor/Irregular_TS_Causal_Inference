@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import networkx as nx
+import os
 
 
 def create_physionet2012_causal_graph() -> nx.DiGraph:
@@ -214,6 +215,7 @@ def create_physionet2012_causal_graph() -> nx.DiGraph:
 
 def draw_graph(
     G: nx.DiGraph,
+    save = 0,
     figsize=(22, 18),
     node_size=1400,
     font_size=8,
@@ -345,8 +347,16 @@ def draw_graph(
     plt.title("PhysioNet 2012 – Causal DAG", fontsize=15)
     plt.axis("off")
     plt.tight_layout()
-    plt.show()
+    if save:
+        file_name = "../PhysioNet 2012 – Causal DAG.png"
+        plt.savefig(file_name)
+        if os.path.exists(file_name):
+            size = os.path.getsize(file_name)
+            if size > 0:
+                print(f"✅ File '{file_name}' exists and has size {size} bytes.")
+    else:
+        plt.show()
 
 
 g = create_physionet2012_causal_graph()
-draw_graph(g)
+draw_graph(g, save=1)
