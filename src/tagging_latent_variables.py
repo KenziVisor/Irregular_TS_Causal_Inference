@@ -4,8 +4,8 @@ import numpy as np
 from tqdm import tqdm
 
 
-pkl_path = "../data/processed/physionet2012_ts_oc_ids.pkl"
-output_csv_path = "../data/latent_tags.csv"
+pkl_path = "../../data/processed/physionet2012_ts_oc_ids.pkl"
+output_csv_path = "../../data/latent_tags.csv"
 
 
 # ============================================================
