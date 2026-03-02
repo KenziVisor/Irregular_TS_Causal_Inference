@@ -6,8 +6,9 @@ import pandas as pd
 import pickle
 
 
-RAW_DATA_PATH = '../physionet2012'
-filepath = '../data/processed/physionet2012_ts_oc_ids.pkl'
+RAW_DATA_PATH = '../../physionet2012'
+filepath = '../../data/processed/physionet2012_ts_oc_ids.pkl'
+makedir_process = '../../data/processed'
 
 
 def read_ts(raw_data_path, set_name):
@@ -63,6 +64,6 @@ def preprocessing(path: str):
 
 # Process and Store Data.
 ts, oc, ts_ids = preprocessing(RAW_DATA_PATH)
-os.makedirs('../data/processed', exist_ok=True)
+os.makedirs(makedir_process, exist_ok=True)
 with open(filepath, 'wb') as file:
     pickle.dump([ts, oc, ts_ids], file)

@@ -13,13 +13,14 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 
-latent_tags_csv_path = "latent_tags.csv"
-physionet_ts_oc_ids_pkl_path = 'physionet2012_ts_oc_ids.pkl'
-
+latent_tags_csv_path = "../../data/latent_tags.csv"
+physionet_ts_oc_ids_pkl_path = '../../data/processed/physionet2012_ts_oc_ids.pkl'
+results_txt_path = "mortality_prediction_results.txt"
 
 # =========================
 # 1) Load & merge data
 # =========================
+
 
 def load_latents_and_outcomes(latent_tags_csv_path: str, physionet_ts_oc_ids_pkl_path: str) -> pd.DataFrame:
     # latent tags
@@ -244,8 +245,6 @@ def run_mortality_from_latents(
     # Save results to TXT
     # =========================
 
-    results_txt_path = "mortality_prediction_results.txt"
-
     with open(results_txt_path, "w") as f:
         f.write("=== Mortality Prediction From Latent Variables ===\n\n")
 
@@ -262,7 +261,6 @@ def run_mortality_from_latents(
         f.write(f"Test metrics:\n{test_metrics_mlp}\n\n")
 
     print(f"\nResults saved to: {results_txt_path}")
-
 
     return {
         "df": df,
