@@ -8,7 +8,7 @@ import operator
 
 
 CheckMode = Literal["avg_value", "time_spacing", "both"]
-filepath = '../../data/processed/physionet2012_ts_oc_ids.pkl'
+filepath = '../../../data/processed/physionet2012_ts_oc_ids.pkl'
 
 
 def split_by_T(
