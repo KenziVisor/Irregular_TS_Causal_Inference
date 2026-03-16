@@ -4,13 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="518a3829-dd69-41b9-8d48-b6bf01057891" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/.name" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/.name" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/Irregular_TS_Causal_Inference.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/Irregular_TS_Causal_Inference.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mortality_prediction_using_latents.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/treatment_split.py" beforeDir="false" />
-    </list>
+    <list default="true" id="518a3829-dd69-41b9-8d48-b6bf01057891" name="Changes" comment="" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -38,24 +32,24 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "Python.cate_estimation.executor": "Run",
-    "Python.causal_inference_on_latent_variables.executor": "Run",
-    "Python.causal_inference_on_latent_variables_updated.executor": "Run",
-    "Python.mortality_prediction_using_latents.executor": "Run",
-    "Python.optimize_latent_thresholds.executor": "Run",
-    "Python.physionet2012_causal_graph.executor": "Run",
-    "Python.preprocess_physionet_2012 (1).executor": "Run",
-    "Python.preprocess_physionet_2012.executor": "Run",
-    "Python.tagging_latent_variables (1).executor": "Run",
-    "Python.tagging_latent_variables.executor": "Run",
-    "Python.treatment_split.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "SHARE_PROJECT_CONFIGURATION_FILES": "true",
-    "git-widget-placeholder": "causal__graph"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;Python.cate_estimation.executor&quot;: &quot;Run&quot;,
+    &quot;Python.causal_inference_on_latent_variables.executor&quot;: &quot;Run&quot;,
+    &quot;Python.causal_inference_on_latent_variables_updated.executor&quot;: &quot;Run&quot;,
+    &quot;Python.mortality_prediction_using_latents.executor&quot;: &quot;Run&quot;,
+    &quot;Python.optimize_latent_thresholds.executor&quot;: &quot;Run&quot;,
+    &quot;Python.physionet2012_causal_graph.executor&quot;: &quot;Run&quot;,
+    &quot;Python.preprocess_physionet_2012 (1).executor&quot;: &quot;Run&quot;,
+    &quot;Python.preprocess_physionet_2012.executor&quot;: &quot;Run&quot;,
+    &quot;Python.tagging_latent_variables (1).executor&quot;: &quot;Run&quot;,
+    &quot;Python.tagging_latent_variables.executor&quot;: &quot;Run&quot;,
+    &quot;Python.treatment_split.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;causal__graph&quot;
   }
-}]]></component>
+}</component>
   <component name="RunManager" selected="Python.cate_estimation">
     <configuration name="cate_estimation" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="Irregular_TS_Causal_Inference" />
