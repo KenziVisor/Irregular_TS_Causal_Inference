@@ -25,12 +25,13 @@ GRAPH_OUTCOME_NODE = "Death"
 # All treatment candidates from your latent tagging pipeline
 TREATMENTS = [
     "Severity", "Shock", "RespFail", "RenalFail", "HepFail", "HemeFail",
-    "Inflam", "NeuroFail", "CardInj", "Metab",
-    "ChronicRisk", "AcuteInsult"
+    "Inflam", "NeuroFail", "CardInj", "Metab"
 ]
 
-OUTPUT_DIR = "./cate_outputs"
+OUTPUT_DIR = "./cate_outputs_expanded_confounders"
 SEED = 42
+DOWN_SAMPLE = True
+USE_EXPANDED_SAFE_CONFOUNDERS = True
 
 
 # ============================================================
@@ -99,6 +100,50 @@ def load_analysis_dataframe(
     df[OUTCOME_COL] = df[OUTCOME_COL].astype(int)
 
     return df
+
+
+def downsample_majority_label(
+    df: pd.DataFrame,
+    outcome_col: str,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """
+    Down-sample the majority class of outcome=0 so that the number of
+    outcome=0 rows matches the number of outcome=1 rows.
+
+    Keeps all outcome=1 rows.
+    Randomly samples outcome=0 rows.
+    """
+    if outcome_col not in df.columns:
+        raise ValueError(f"Outcome column '{outcome_col}' not found in dataframe")
+
+    df_pos = df[df[outcome_col] == 1].copy()
+    df_neg = df[df[outcome_col] == 0].copy()
+
+    n_pos = len(df_pos)
+    n_neg = len(df_neg)
+
+    print(f"[Down-sample] Before: label1={n_pos}, label0={n_neg}")
+
+    if n_pos == 0:
+        print("[Down-sample] No positive rows found. Skipping down-sampling.")
+        return df.copy()
+
+    if n_neg <= n_pos:
+        print("[Down-sample] label0 is not larger than label1. Skipping down-sampling.")
+        return df.copy()
+
+    df_neg_sampled = df_neg.sample(n=n_pos, random_state=seed, replace=False)
+
+    df_balanced = pd.concat([df_pos, df_neg_sampled], axis=0)
+    df_balanced = df_balanced.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+    new_pos = int((df_balanced[outcome_col] == 1).sum())
+    new_neg = int((df_balanced[outcome_col] == 0).sum())
+
+    print(f"[Down-sample] After:  label1={new_pos}, label0={new_neg}")
+
+    return df_balanced
 
 
 # ============================================================
@@ -234,6 +279,7 @@ def get_backdoor_paths(
 
     return paths
 
+
 def is_path_active_given_Z(
     G: nx.DiGraph,
     path: List[str],
@@ -338,6 +384,91 @@ def candidate_backdoor_pool(
     return pool
 
 
+def get_colliders_on_backdoor_paths(
+    G: nx.DiGraph,
+    treatment: str,
+    outcome: str,
+) -> Set[str]:
+    """
+    Find all collider nodes that appear on any backdoor path.
+    """
+    colliders = set()
+
+    for path in get_backdoor_paths(G, treatment, outcome):
+        if len(path) < 3:
+            continue
+
+        for i in range(1, len(path) - 1):
+            left = path[i - 1]
+            middle = path[i]
+            right = path[i + 1]
+
+            if is_collider_on_path(G, left, middle, right):
+                colliders.add(middle)
+
+    return colliders
+
+
+def get_descendants_of_nodes(
+    G: nx.DiGraph,
+    nodes: Set[str],
+) -> Set[str]:
+    """
+    Union of descendants of a node set.
+    """
+    out = set()
+    for n in nodes:
+        out |= nx.descendants(G, n)
+    return out
+
+
+def safe_expanded_backdoor_adjustment_set(
+    G: nx.DiGraph,
+    treatment: str,
+    outcome: str,
+    available_columns: List[str],
+) -> Tuple[List[str], List[List[str]], Dict[str, List[str]]]:
+    """
+    Expanded but safe adjustment set.
+
+    Strategy:
+    - Start from the current principled candidate pool
+    - Remove any node that is:
+        (a) a collider on any backdoor path
+        (b) a descendant of such a collider
+    - Keep the remaining nodes if they still block all backdoor paths
+    - If not, fall back to minimal_backdoor_adjustment_set
+    """
+    pool = candidate_backdoor_pool(G, treatment, outcome, available_columns)
+
+    colliders = get_colliders_on_backdoor_paths(G, treatment, outcome)
+    collider_descendants = get_descendants_of_nodes(G, colliders)
+
+    forbidden = (colliders | collider_descendants) - {treatment, outcome}
+    safe_pool = set(pool) - forbidden
+
+    diagnostics = {
+        "colliders_removed": sorted(pool & colliders),
+        "collider_descendants_removed": sorted(pool & collider_descendants),
+        "safe_pool_before_block_check": sorted(safe_pool),
+    }
+
+    if blocks_all_backdoor_paths(G, treatment, outcome, safe_pool):
+        remaining_open_paths = open_backdoor_paths(G, treatment, outcome, safe_pool)
+        return sorted(safe_pool), remaining_open_paths, diagnostics
+
+    # fallback: keep identification first
+    minimal_set, remaining_open_paths = minimal_backdoor_adjustment_set(
+        G=G,
+        treatment=treatment,
+        outcome=outcome,
+        available_columns=available_columns,
+    )
+
+    diagnostics["fallback_to_minimal"] = sorted(minimal_set)
+    return minimal_set, remaining_open_paths, diagnostics
+
+
 def minimal_backdoor_adjustment_set(
     G: nx.DiGraph,
     treatment: str,
@@ -380,13 +511,11 @@ def find_backdoor_confounders(
     """
     Main function to use in your pipeline.
 
-    Returns:
-    - graph_candidates: confounders as graph node names
-    - observed_confounders: mapped dataframe columns
-    - missing_graph_nodes: allowed graph nodes that were selected but do not map
-    - candidate_pool: full pre-minimalization pool
-    - open_backdoor_paths_if_any: remaining open paths if identification failed
-    - identifiable_with_available_nodes: bool
+    If USE_EXPANDED_SAFE_CONFOUNDERS=True:
+      - use a larger safe adjustment set
+      - explicitly exclude colliders and descendants of colliders
+    Otherwise:
+      - use the old minimal adjustment set
     """
     available_set = set(available_columns)
 
@@ -397,12 +526,25 @@ def find_backdoor_confounders(
         available_columns=available_columns,
     ))
 
-    graph_candidates, remaining_open_paths = minimal_backdoor_adjustment_set(
-        G=G,
-        treatment=treatment,
-        outcome=outcome_graph_node,
-        available_columns=available_columns,
-    )
+    if USE_EXPANDED_SAFE_CONFOUNDERS:
+        graph_candidates, remaining_open_paths, diagnostics = safe_expanded_backdoor_adjustment_set(
+            G=G,
+            treatment=treatment,
+            outcome=outcome_graph_node,
+            available_columns=available_columns,
+        )
+    else:
+        graph_candidates, remaining_open_paths = minimal_backdoor_adjustment_set(
+            G=G,
+            treatment=treatment,
+            outcome=outcome_graph_node,
+            available_columns=available_columns,
+        )
+        diagnostics = {
+            "colliders_removed": [],
+            "collider_descendants_removed": [],
+            "safe_pool_before_block_check": [],
+        }
 
     observed_cols: List[str] = []
     missing_graph_nodes: List[str] = []
@@ -423,6 +565,9 @@ def find_backdoor_confounders(
         "missing_graph_nodes": missing_graph_nodes,
         "open_backdoor_paths_if_any": [" -> ".join(p) for p in remaining_open_paths],
         "identifiable_with_available_nodes": len(remaining_open_paths) == 0,
+        "colliders_removed": diagnostics.get("colliders_removed", []),
+        "collider_descendants_removed": diagnostics.get("collider_descendants_removed", []),
+        "safe_pool_before_block_check": diagnostics.get("safe_pool_before_block_check", []),
     }
 
 
@@ -543,13 +688,31 @@ def fit_one_treatment(
     out = model_df[["ts_id", treatment, OUTCOME_COL]].copy()
     out["CATE"] = cate
 
+    # Normalize by target rate (outcome prevalence)
+    target_rate = float(model_df[OUTCOME_COL].mean())
+
+    if target_rate > 0:
+        out["normalized_CATE"] = out["CATE"] / target_rate
+    else:
+        out["normalized_CATE"] = np.nan
+
     try:
         lb, ub = est.effect_interval(X=X, alpha=0.05)
         out["CATE_lower_95"] = lb
         out["CATE_upper_95"] = ub
+
+        if target_rate > 0:
+            out["normalized_CATE_lower_95"] = out["CATE_lower_95"] / target_rate
+            out["normalized_CATE_upper_95"] = out["CATE_upper_95"] / target_rate
+        else:
+            out["normalized_CATE_lower_95"] = np.nan
+            out["normalized_CATE_upper_95"] = np.nan
+
     except Exception:
         out["CATE_lower_95"] = np.nan
         out["CATE_upper_95"] = np.nan
+        out["normalized_CATE_lower_95"] = np.nan
+        out["normalized_CATE_upper_95"] = np.nan
 
     formula = (
         f"CATE_{treatment}(x) = E[{OUTCOME_COL}(1) - {OUTCOME_COL}(0) | X=x]\n"
@@ -567,6 +730,11 @@ def fit_one_treatment(
         "std_cate": float(out["CATE"].std()),
         "min_cate": float(out["CATE"].min()),
         "max_cate": float(out["CATE"].max()),
+        "mean_normalized_cate": float(out["normalized_CATE"].mean()) if out[
+            "normalized_CATE"].notna().any() else np.nan,
+        "std_normalized_cate": float(out["normalized_CATE"].std()) if out["normalized_CATE"].notna().any() else np.nan,
+        "min_normalized_cate": float(out["normalized_CATE"].min()) if out["normalized_CATE"].notna().any() else np.nan,
+        "max_normalized_cate": float(out["normalized_CATE"].max()) if out["normalized_CATE"].notna().any() else np.nan,
     }
 
     return est, out, summary, formula
@@ -589,13 +757,33 @@ def write_confounder_analysis(
         f.write("- Allowed adjustment variables: latent + background/meta only\n")
         f.write("- Excluded descendants of treatment\n")
         f.write("- Built candidate pool using ancestors of treatment and outcome in do(T) graph\n")
-        f.write("- Minimalized set by blocking all backdoor paths via d-separation\n\n")
+        if USE_EXPANDED_SAFE_CONFOUNDERS:
+            f.write("- Excluded colliders on backdoor paths\n")
+            f.write("- Excluded descendants of those colliders\n")
+            f.write("- Used expanded safe blocking set when possible\n")
+            f.write("- Fell back to minimal blocking set only if needed for identification\n\n")
+        else:
+            f.write("- Minimalized set by blocking all backdoor paths via d-separation\n\n")
 
         f.write(f"Identifiable with available nodes: {confounder_info['identifiable_with_available_nodes']}\n\n")
 
         f.write("Candidate pool:\n")
         if confounder_info["candidate_pool"]:
             for c in confounder_info["candidate_pool"]:
+                f.write(f"  - {c}\n")
+        else:
+            f.write("  - None\n")
+
+        f.write("\nColliders removed from candidate pool:\n")
+        if confounder_info["colliders_removed"]:
+            for c in confounder_info["colliders_removed"]:
+                f.write(f"  - {c}\n")
+        else:
+            f.write("  - None\n")
+
+        f.write("\nDescendants of colliders removed from candidate pool:\n")
+        if confounder_info["collider_descendants_removed"]:
+            for c in confounder_info["collider_descendants_removed"]:
                 f.write(f"  - {c}\n")
         else:
             f.write("  - None\n")
@@ -656,7 +844,11 @@ def write_summary_results(
         f.write(f"Mean CATE: {summary['mean_cate']:.6f}\n")
         f.write(f"Std CATE: {summary['std_cate']:.6f}\n")
         f.write(f"Min CATE: {summary['min_cate']:.6f}\n")
-        f.write(f"Max CATE: {summary['max_cate']:.6f}\n\n")
+        f.write(f"Max CATE: {summary['max_cate']:.6f}\n")
+        f.write(f"Mean normalized CATE: {summary['mean_normalized_cate']:.6f}\n")
+        f.write(f"Std normalized CATE: {summary['std_normalized_cate']:.6f}\n")
+        f.write(f"Min normalized CATE: {summary['min_normalized_cate']:.6f}\n")
+        f.write(f"Max normalized CATE: {summary['max_normalized_cate']:.6f}\n\n")
 
         f.write(f"Per-patient CATE file: {cate_csv_path}\n")
 
@@ -673,7 +865,18 @@ def main():
     G = load_graph(GRAPH_PKL_PATH)
 
     print(f"Loaded df shape: {df.shape}")
-    print(f"Outcome rate: {df[OUTCOME_COL].mean():.4f}")
+    print(f"Outcome rate before down-sampling: {df[OUTCOME_COL].mean():.4f}")
+
+    if DOWN_SAMPLE:
+        df = downsample_majority_label(
+            df=df,
+            outcome_col=OUTCOME_COL,
+            seed=SEED,
+        )
+        print(f"Loaded df shape after down-sampling: {df.shape}")
+        print(f"Outcome rate after down-sampling: {df[OUTCOME_COL].mean():.4f}")
+    else:
+        print(f"Outcome rate: {df[OUTCOME_COL].mean():.4f}")
 
     global_summary_rows = []
 
@@ -766,6 +969,10 @@ def main():
                 "std_cate": summary["std_cate"],
                 "min_cate": summary["min_cate"],
                 "max_cate": summary["max_cate"],
+                "mean_normalized_cate": summary["mean_normalized_cate"],
+                "std_normalized_cate": summary["std_normalized_cate"],
+                "min_normalized_cate": summary["min_normalized_cate"],
+                "max_normalized_cate": summary["max_normalized_cate"],
                 "num_observed_confounders": len(confounder_info["observed_confounders"]),
                 "num_missing_graph_candidates": len(confounder_info["missing_graph_nodes"]),
                 "observed_confounders": ", ".join(confounder_info["observed_confounders"]),
