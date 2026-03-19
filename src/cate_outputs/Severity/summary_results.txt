@@ -1,0 +1,26 @@
+=== CATE Summary Results ===
+
+Treatment: Severity
+Outcome: in_hospital_mortality
+
+Model formula / variables:
+CATE_Severity(x) = E[in_hospital_mortality(1) - in_hospital_mortality(0) | X=x]
+T = Severity
+Y = in_hospital_mortality
+W (backdoor confounders) = ['Age']
+X (effect modifiers) = ['Age', 'Gender', 'Weight', 'ICUType_1', 'ICUType_2', 'ICUType_3', 'ICUType_4', 'ChronicRisk', 'AcuteInsult']
+
+Backdoor confounder analysis summary:
+Observed confounders used: ['Age']
+Missing graph candidates: []
+
+Results:
+N used by model: 11988
+Outcome positive rate: 0.142392
+Treatment positive rate: 0.449449
+Mean CATE: 0.068011
+Std CATE: 0.036402
+Min CATE: -0.057014
+Max CATE: 0.221226
+
+Per-patient CATE file: ./cate_outputs\Severity\cate.csv

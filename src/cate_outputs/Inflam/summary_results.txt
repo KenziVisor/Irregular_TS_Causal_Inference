@@ -1,0 +1,26 @@
+=== CATE Summary Results ===
+
+Treatment: Inflam
+Outcome: in_hospital_mortality
+
+Model formula / variables:
+CATE_Inflam(x) = E[in_hospital_mortality(1) - in_hospital_mortality(0) | X=x]
+T = Inflam
+Y = in_hospital_mortality
+W (backdoor confounders) = ['Severity']
+X (effect modifiers) = ['Age', 'Gender', 'Weight', 'ICUType_1', 'ICUType_2', 'ICUType_3', 'ICUType_4', 'ChronicRisk', 'AcuteInsult']
+
+Backdoor confounder analysis summary:
+Observed confounders used: ['Severity']
+Missing graph candidates: []
+
+Results:
+N used by model: 11988
+Outcome positive rate: 0.142392
+Treatment positive rate: 0.866283
+Mean CATE: 0.056648
+Std CATE: 0.032888
+Min CATE: -0.074801
+Max CATE: 0.178195
+
+Per-patient CATE file: ./cate_outputs\Inflam\cate.csv

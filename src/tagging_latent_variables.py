@@ -83,6 +83,40 @@ def build_patient_summaries(df_wide):
 # 3. DECISION TREES
 # ============================================================
 
+def tag_severity(row):
+    """
+    Early global severity latent based on admission/early observed instability.
+    Uses first available values to stay as upstream as possible.
+    Severity = 1 if at least 2 early abnormal domains are present.
+    """
+
+    circulatory = int(
+        (row.get("MAP_first", np.inf) < 70) or
+        (row.get("SysABP_first", np.inf) <= 100)
+    )
+
+    neurologic = int(
+        row.get("GCS_first", 15) < 15
+    )
+
+    respiratory = int(
+        (row.get("RespRate_first", -np.inf) >= 22) or
+        (row.get("SaO2_first", 100) < 92)
+    )
+
+    metabolic = int(
+        (row.get("Lactate_first", 0) > 2.0) or
+        (row.get("pH_first", 7.4) < 7.30) or
+        (row.get("HCO3_first", 25) < 18)
+    )
+
+    renal = int(
+        row.get("Creatinine_first", 0) >= 2.0
+    )
+
+    score = circulatory + neurologic + respiratory + metabolic + renal
+    return int(score >= 2)
+
 
 def tag_shock(row):
     return int(
@@ -181,6 +215,7 @@ def get_latent_decision_trees():
     print("[4/5] Initializing latent decision trees...")
 
     trees = {
+        "Severity": tag_severity,
         "Shock": tag_shock,
         "RespFail": tag_respfail,
         "RenalFail": tag_renalfail,

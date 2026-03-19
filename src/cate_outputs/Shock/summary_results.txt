@@ -1,0 +1,26 @@
+=== CATE Summary Results ===
+
+Treatment: Shock
+Outcome: in_hospital_mortality
+
+Model formula / variables:
+CATE_Shock(x) = E[in_hospital_mortality(1) - in_hospital_mortality(0) | X=x]
+T = Shock
+Y = in_hospital_mortality
+W (backdoor confounders) = ['CardInj', 'Severity']
+X (effect modifiers) = ['Age', 'Gender', 'Weight', 'ICUType_1', 'ICUType_2', 'ICUType_3', 'ICUType_4', 'ChronicRisk', 'AcuteInsult']
+
+Backdoor confounder analysis summary:
+Observed confounders used: ['CardInj', 'Severity']
+Missing graph candidates: []
+
+Results:
+N used by model: 11988
+Outcome positive rate: 0.142392
+Treatment positive rate: 0.642559
+Mean CATE: 0.003252
+Std CATE: 0.037639
+Min CATE: -0.110436
+Max CATE: 0.134848
+
+Per-patient CATE file: ./cate_outputs\Shock\cate.csv

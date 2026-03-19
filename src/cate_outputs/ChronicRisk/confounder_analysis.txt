@@ -1,0 +1,27 @@
+=== Confounder Analysis ===
+
+Treatment: ChronicRisk
+Outcome (graph node): Death
+
+Method used:
+- Allowed adjustment variables: latent + background/meta only
+- Excluded descendants of treatment
+- Built candidate pool using ancestors of treatment and outcome in do(T) graph
+- Minimalized set by blocking all backdoor paths via d-separation
+
+Identifiable with available nodes: True
+
+Candidate pool:
+  - Age
+
+Final graph-level confounders:
+  - Age
+
+Observed dataframe confounders used:
+  - Age
+
+Missing selected graph nodes:
+  - None
+
+Open backdoor paths remaining (if not identifiable):
+  - None

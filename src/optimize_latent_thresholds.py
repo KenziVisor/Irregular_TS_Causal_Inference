@@ -121,6 +121,20 @@ def tag_latents(row: pd.Series, thr: dict) -> dict:
         v = row.get(key, default)
         return v
 
+    # Severity
+    severity_flags = [
+        int((g("MAP_first", np.inf) < thr["severity_map"]) or
+            (g("SysABP_first", np.inf) <= thr["severity_sysabp"])),
+        int(g("GCS_first", 15.0) < thr["severity_gcs"]),
+        int((g("RespRate_first", -np.inf) >= thr["severity_resprate"]) or
+            (g("SaO2_first", 100.0) < thr["severity_sao2"])),
+        int((g("Lactate_first", 0.0) > thr["severity_lact"]) or
+            (g("pH_first", 7.4) < thr["severity_ph"]) or
+            (g("HCO3_first", 25.0) < thr["severity_hco3"])),
+        int(g("Creatinine_first", 0.0) >= thr["severity_creat"]),
+    ]
+    severity = int(sum(severity_flags) >= thr["severity_min_count"])
+
     # Shock
     shock = int(
         (g("MAP_min", np.inf) < thr["shock_map"]) or
@@ -200,6 +214,7 @@ def tag_latents(row: pd.Series, thr: dict) -> dict:
     )
 
     return {
+        "Severity": severity,
         "Shock": shock,
         "RespFail": respfail,
         "RenalFail": renalfail,
@@ -333,6 +348,18 @@ def final_train_val_test_metrics(summary_df: pd.DataFrame, oc: pd.DataFrame, thr
 # =========================
 def suggest_thresholds(trial: optuna.Trial) -> dict:
     return {
+        # Severity
+        "severity_map": trial.suggest_float("severity_map", 60, 75),
+        "severity_sysabp": trial.suggest_float("severity_sysabp", 90, 105),
+        "severity_gcs": trial.suggest_float("severity_gcs", 12, 15),
+        "severity_resprate": trial.suggest_float("severity_resprate", 20, 30),
+        "severity_sao2": trial.suggest_float("severity_sao2", 88, 95),
+        "severity_lact": trial.suggest_float("severity_lact", 1.5, 4.0),
+        "severity_ph": trial.suggest_float("severity_ph", 7.10, 7.35),
+        "severity_hco3": trial.suggest_float("severity_hco3", 12, 22),
+        "severity_creat": trial.suggest_float("severity_creat", 1.2, 3.0),
+        "severity_min_count": trial.suggest_int("severity_min_count", 2, 3),
+
         # Shock
         "shock_map": trial.suggest_float("shock_map", 55, 80),
         "shock_sysabp": trial.suggest_float("shock_sysabp", 80, 110),
@@ -427,7 +454,7 @@ def main():
     y_all = df_merged["in_hospital_mortality"].astype(int).values
     n_patients = len(df_merged)
     mortality_rate = float(y_all.mean())
-    n_features = 11  # your latent set size
+    n_features = 12  # your latent set size
 
     with open(RESULTS_TXT_PATH, "w") as f:
         f.write("=== Mortality Prediction From Latent Variables ===\n\n")

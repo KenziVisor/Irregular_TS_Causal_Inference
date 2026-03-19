@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import pickle
 import warnings
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 import networkx as nx
 import numpy as np
@@ -24,7 +24,7 @@ GRAPH_OUTCOME_NODE = "Death"
 
 # All treatment candidates from your latent tagging pipeline
 TREATMENTS = [
-    "Shock", "RespFail", "RenalFail", "HepFail", "HemeFail",
+    "Severity", "Shock", "RespFail", "RenalFail", "HepFail", "HemeFail",
     "Inflam", "NeuroFail", "CardInj", "Metab",
     "ChronicRisk", "AcuteInsult"
 ]
@@ -104,15 +104,271 @@ def load_analysis_dataframe(
 # ============================================================
 # Graph logic: backdoor-style confounder discovery
 # ============================================================
-def map_graph_node_to_dataframe_columns(node: str, available_columns: set[str]) -> List[str]:
+
+
+def dataframe_columns_to_graph_nodes(
+    available_columns: List[str],
+    G: nx.DiGraph,
+) -> Set[str]:
     """
-    Map a graph node name to observed dataframe columns.
-    ICUType in the graph corresponds to ICUType_1..ICUType_4 in the data.
+    Map dataframe columns to graph node names.
+
+    Rules:
+    - ICUType_1..4 in dataframe correspond to ICUType in graph
+    - in_hospital_mortality is dataframe outcome, graph node is Death -> ignore here
+    - ts_id is an identifier -> ignore
+    - all other columns are kept only if they are actual graph nodes
+    """
+    graph_nodes = set(G.nodes)
+    mapped = set()
+
+    for col in available_columns:
+        if col == "ts_id":
+            continue
+        if col == "in_hospital_mortality":
+            continue
+        if col.startswith("ICUType_"):
+            if "ICUType" in graph_nodes:
+                mapped.add("ICUType")
+            continue
+        if col in graph_nodes:
+            mapped.add(col)
+
+    return mapped
+
+
+def map_graph_node_to_dataframe_columns(
+    node: str,
+    available_columns: Set[str],
+) -> List[str]:
+    """
+    Map a graph node back to dataframe columns.
     """
     if node == "ICUType":
         return [c for c in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"] if c in available_columns]
 
     return [node] if node in available_columns else []
+
+
+def get_allowed_adjustment_nodes(
+    G: nx.DiGraph,
+    available_columns: List[str],
+) -> Set[str]:
+    """
+    Allowed adjustment variables:
+    - latent nodes
+    - background/meta nodes
+    - and only if they are actually available in the dataframe
+    """
+    available_graph_nodes = dataframe_columns_to_graph_nodes(available_columns, G)
+
+    allowed = set()
+    for n, attrs in G.nodes(data=True):
+        node_type = attrs.get("node_type")
+        if node_type in {"latent", "background"} and n in available_graph_nodes:
+            allowed.add(n)
+
+    return allowed
+
+
+def remove_outgoing_edges_of_treatment(
+    G: nx.DiGraph,
+    treatment: str,
+) -> nx.DiGraph:
+    """
+    Intervention-style graph for backdoor reasoning:
+    remove all outgoing edges from treatment.
+    """
+    G_do = G.copy()
+    G_do.remove_edges_from(list(G.out_edges(treatment)))
+    return G_do
+
+
+def is_collider_on_path(
+    G: nx.DiGraph,
+    left: str,
+    middle: str,
+    right: str,
+) -> bool:
+    """
+    A node is a collider on a path if both arrows point into it:
+    left -> middle <- right
+    """
+    return G.has_edge(left, middle) and G.has_edge(right, middle)
+
+
+def ancestors_of_set(
+    G: nx.DiGraph,
+    nodes: Set[str],
+) -> Set[str]:
+    """
+    All ancestors of a node set, including the set itself.
+    """
+    anc = set(nodes)
+    for n in nodes:
+        anc |= nx.ancestors(G, n)
+    return anc
+
+
+def get_backdoor_paths(
+    G: nx.DiGraph,
+    treatment: str,
+    outcome: str,
+) -> List[List[str]]:
+    """
+    Enumerate all simple undirected paths between treatment and outcome
+    that start with an arrow into treatment, i.e. real backdoor paths.
+    """
+    UG = G.to_undirected()
+    paths = []
+
+    for path in nx.all_simple_paths(UG, source=treatment, target=outcome):
+        if len(path) < 2:
+            continue
+
+        first_neighbor = path[1]
+
+        # Backdoor path must start with: first_neighbor -> treatment
+        if G.has_edge(first_neighbor, treatment):
+            paths.append(path)
+
+    return paths
+
+def is_path_active_given_Z(
+    G: nx.DiGraph,
+    path: List[str],
+    Z: Set[str],
+) -> bool:
+    """
+    Check whether a specific path is active (open) given conditioning set Z,
+    using d-separation rules.
+
+    Rules:
+    - non-collider in Z => path blocked
+    - collider not in An(Z) => path blocked
+    """
+    if len(path) <= 2:
+        # direct edge path; if it's a backdoor direct path, it is active unless blocked
+        return True
+
+    ancestors_Z = ancestors_of_set(G, Z) if Z else set()
+
+    for i in range(1, len(path) - 1):
+        left = path[i - 1]
+        middle = path[i]
+        right = path[i + 1]
+
+        collider = is_collider_on_path(G, left, middle, right)
+
+        if collider:
+            if middle not in ancestors_Z:
+                return False
+        else:
+            if middle in Z:
+                return False
+
+    return True
+
+
+def open_backdoor_paths(
+    G: nx.DiGraph,
+    treatment: str,
+    outcome: str,
+    Z: Set[str],
+) -> List[List[str]]:
+    """
+    Return all open backdoor paths between treatment and outcome given Z.
+    """
+    paths = get_backdoor_paths(G, treatment, outcome)
+    return [p for p in paths if is_path_active_given_Z(G, p, Z)]
+
+
+def blocks_all_backdoor_paths(
+    G: nx.DiGraph,
+    treatment: str,
+    outcome: str,
+    Z: Set[str],
+) -> bool:
+    """
+    True iff Z blocks all backdoor paths from treatment to outcome.
+    """
+    return len(open_backdoor_paths(G, treatment, outcome, Z)) == 0
+
+
+def candidate_backdoor_pool(
+    G: nx.DiGraph,
+    treatment: str,
+    outcome: str,
+    available_columns: List[str],
+) -> Set[str]:
+    """
+    Build a principled candidate pool.
+
+    We keep only nodes that:
+    1. are allowed adjustment variables (latent/background + available)
+    2. are NOT descendants of treatment
+    3. are ancestors of treatment in the original graph
+    4. remain ancestors of outcome after removing outgoing edges from treatment
+
+    Point (4) is important:
+    it removes nodes whose effect on outcome goes only through treatment.
+    """
+    if treatment not in G:
+        raise ValueError(f"Treatment node '{treatment}' is not in graph")
+    if outcome not in G:
+        raise ValueError(f"Outcome node '{outcome}' is not in graph")
+
+    allowed = get_allowed_adjustment_nodes(G, available_columns)
+    descendants_t = nx.descendants(G, treatment)
+
+    G_do = remove_outgoing_edges_of_treatment(G, treatment)
+
+    anc_t = nx.ancestors(G, treatment)
+    anc_y_do = nx.ancestors(G_do, outcome)
+
+    pool = (
+        allowed
+        & anc_t
+        & anc_y_do
+    )
+
+    pool -= descendants_t
+    pool -= {treatment, outcome}
+
+    return pool
+
+
+def minimal_backdoor_adjustment_set(
+    G: nx.DiGraph,
+    treatment: str,
+    outcome: str,
+    available_columns: List[str],
+) -> Tuple[List[str], List[List[str]]]:
+    """
+    Compute a minimal adjustment set over the allowed variable universe.
+
+    Strategy:
+    - Start from the principled candidate pool
+    - If the whole pool still does not block all backdoor paths, return failure
+    - Otherwise remove redundant variables one by one while blocking is preserved
+    """
+    pool = candidate_backdoor_pool(G, treatment, outcome, available_columns)
+
+    # deterministic order
+    current = set(sorted(pool))
+
+    if not blocks_all_backdoor_paths(G, treatment, outcome, current):
+        # even the full allowed pool cannot identify the effect
+        remaining_open_paths = open_backdoor_paths(G, treatment, outcome, current)
+        return [], remaining_open_paths
+
+    for node in sorted(pool):
+        trial = current - {node}
+        if blocks_all_backdoor_paths(G, treatment, outcome, trial):
+            current = trial
+
+    remaining_open_paths = open_backdoor_paths(G, treatment, outcome, current)
+    return sorted(current), remaining_open_paths
 
 
 def find_backdoor_confounders(
@@ -122,19 +378,31 @@ def find_backdoor_confounders(
     available_columns: List[str],
 ) -> Dict[str, List[str]]:
     """
-    Practical observed confounder finder:
-      candidates = ancestors(T) ∩ ancestors(Y) − descendants(T) − {T, Y}
-    Then keep only variables actually observed in the dataframe.
+    Main function to use in your pipeline.
 
-    Returns both graph-level and dataframe-level confounders.
+    Returns:
+    - graph_candidates: confounders as graph node names
+    - observed_confounders: mapped dataframe columns
+    - missing_graph_nodes: allowed graph nodes that were selected but do not map
+    - candidate_pool: full pre-minimalization pool
+    - open_backdoor_paths_if_any: remaining open paths if identification failed
+    - identifiable_with_available_nodes: bool
     """
     available_set = set(available_columns)
 
-    ancestors_t = nx.ancestors(G, treatment)
-    ancestors_y = nx.ancestors(G, outcome_graph_node)
-    descendants_t = nx.descendants(G, treatment)
+    pool = sorted(candidate_backdoor_pool(
+        G=G,
+        treatment=treatment,
+        outcome=outcome_graph_node,
+        available_columns=available_columns,
+    ))
 
-    graph_candidates = sorted((ancestors_t & ancestors_y) - descendants_t - {treatment, outcome_graph_node})
+    graph_candidates, remaining_open_paths = minimal_backdoor_adjustment_set(
+        G=G,
+        treatment=treatment,
+        outcome=outcome_graph_node,
+        available_columns=available_columns,
+    )
 
     observed_cols: List[str] = []
     missing_graph_nodes: List[str] = []
@@ -149,9 +417,12 @@ def find_backdoor_confounders(
     observed_cols = sorted(set(observed_cols))
 
     return {
+        "candidate_pool": pool,
         "graph_candidates": graph_candidates,
         "observed_confounders": observed_cols,
         "missing_graph_nodes": missing_graph_nodes,
+        "open_backdoor_paths_if_any": [" -> ".join(p) for p in remaining_open_paths],
+        "identifiable_with_available_nodes": len(remaining_open_paths) == 0,
     }
 
 
@@ -312,29 +583,48 @@ def write_confounder_analysis(
     with open(path, "w", encoding="utf-8") as f:
         f.write("=== Confounder Analysis ===\n\n")
         f.write(f"Treatment: {treatment}\n")
-        f.write(f"Outcome (graph node): {GRAPH_OUTCOME_NODE}\n\n")
+        f.write("Outcome (graph node): Death\n\n")
 
-        f.write("Backdoor-style candidate rule used:\n")
-        f.write("ancestors(T) ∩ ancestors(Y) − descendants(T) − {T, Y}\n\n")
+        f.write("Method used:\n")
+        f.write("- Allowed adjustment variables: latent + background/meta only\n")
+        f.write("- Excluded descendants of treatment\n")
+        f.write("- Built candidate pool using ancestors of treatment and outcome in do(T) graph\n")
+        f.write("- Minimalized set by blocking all backdoor paths via d-separation\n\n")
 
-        f.write("Graph-level candidate confounders:\n")
+        f.write(f"Identifiable with available nodes: {confounder_info['identifiable_with_available_nodes']}\n\n")
+
+        f.write("Candidate pool:\n")
+        if confounder_info["candidate_pool"]:
+            for c in confounder_info["candidate_pool"]:
+                f.write(f"  - {c}\n")
+        else:
+            f.write("  - None\n")
+
+        f.write("\nFinal graph-level confounders:\n")
         if confounder_info["graph_candidates"]:
             for c in confounder_info["graph_candidates"]:
                 f.write(f"  - {c}\n")
         else:
             f.write("  - None\n")
 
-        f.write("\nObserved confounders actually available in dataframe:\n")
+        f.write("\nObserved dataframe confounders used:\n")
         if confounder_info["observed_confounders"]:
             for c in confounder_info["observed_confounders"]:
                 f.write(f"  - {c}\n")
         else:
             f.write("  - None\n")
 
-        f.write("\nGraph candidates missing from dataframe:\n")
+        f.write("\nMissing selected graph nodes:\n")
         if confounder_info["missing_graph_nodes"]:
             for c in confounder_info["missing_graph_nodes"]:
                 f.write(f"  - {c}\n")
+        else:
+            f.write("  - None\n")
+
+        f.write("\nOpen backdoor paths remaining (if not identifiable):\n")
+        if confounder_info["open_backdoor_paths_if_any"]:
+            for p in confounder_info["open_backdoor_paths_if_any"]:
+                f.write(f"  - {p}\n")
         else:
             f.write("  - None\n")
 

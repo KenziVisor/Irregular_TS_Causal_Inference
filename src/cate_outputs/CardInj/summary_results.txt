@@ -1,0 +1,9 @@
+=== CATE Summary Results ===
+
+Treatment: CardInj
+Run status: FAILED
+
+Reason: ValueError('CardInj must be binary 0/1. Found: [0]')
+
+Observed confounders that would have been used: ['Severity']
+Effect modifiers that would have been used: ['Age', 'Gender', 'Weight', 'ICUType_1', 'ICUType_2', 'ICUType_3', 'ICUType_4', 'ChronicRisk', 'AcuteInsult']
