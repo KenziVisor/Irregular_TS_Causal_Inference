@@ -15,7 +15,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 # ============================================================
 # Config
 # ============================================================
-LATENT_TAGS_PATH = "../../data/latent_tags.csv"
+LATENT_TAGS_PATH = "../../data/latent_tags_clinical.csv"
 PHYSIONET_PKL_PATH = "../../data/processed/physionet2012_ts_oc_ids.pkl"
 GRAPH_PKL_PATH = "../../data/causal_graph.pkl"
 
