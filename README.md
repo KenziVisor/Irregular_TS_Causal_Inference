@@ -1,5 +1,7 @@
 # Thesis Repository — Causal Inference for Time-Series Data
 
+<img src="Thesis code Workflow.png" alt="Thesis code workflow">
+
 ## Introduction
 
 This repository contains ongoing research work exploring causal inference methods applied to multivariate time-series data. The project investigates how structured representations and learned latent variables can help uncover causal relationships in complex temporal systems.
