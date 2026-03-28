@@ -16,7 +16,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 # ============================================================
 # Config
 # ============================================================
-LATENT_TAGS_PATH = "../../data/latent_tags_clinical.csv"
+LATENT_TAGS_PATH = "../../data/predicted_latent_tags_230326_absolute_tags.csv"
 PHYSIONET_PKL_PATH = "../../data/processed/physionet2012_ts_oc_ids.pkl"
 GRAPH_PKL_PATH = "../../data/causal_graph.pkl"
 
@@ -29,7 +29,7 @@ TREATMENTS = [
     "Inflam", "NeuroFail", "CardInj", "Metab"
 ]
 
-OUTPUT_DIR = "./cate_outputs"
+OUTPUT_DIR = "./cate_outputs_predicted_230326"
 SEED = 42
 DOWN_SAMPLE = False
 USE_EXPANDED_SAFE_CONFOUNDERS = True
@@ -82,6 +82,7 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
+
 def build_treatment_output_csv(
     treatment_dir: str,
     treatment: str,
@@ -90,10 +91,17 @@ def build_treatment_output_csv(
     return os.path.join(treatment_dir, f"{treatment}_{suffix}.csv")
 
 
+def build_treatment_output_pkl(
+    treatment_dir: str,
+    treatment: str,
+    suffix: str,
+) -> str:
+    return os.path.join(treatment_dir, f"{treatment}_{suffix}.pkl")
+
+
 def build_run_output_csv(output_dir: str, suffix: str) -> str:
     run_name = os.path.basename(os.path.normpath(output_dir))
     return os.path.join(output_dir, f"{run_name}_{suffix}.csv")
-
 
 
 # ============================================================
@@ -111,6 +119,45 @@ def load_graph(path: str) -> nx.DiGraph:
     if not isinstance(G, nx.DiGraph):
         raise TypeError("Loaded graph is not a networkx.DiGraph")
     return G
+
+
+def save_model_artifact(path: str, artifact: Dict[str, object]) -> None:
+    with open(path, "wb") as f:
+        pickle.dump(artifact, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_model_artifact(path: str) -> Dict[str, object]:
+    with open(path, "rb") as f:
+        artifact = pickle.load(f)
+    if not isinstance(artifact, dict):
+        raise TypeError("Loaded model artifact is not a dict")
+    return artifact
+
+
+def build_effect_modifier_matrix(
+    df: pd.DataFrame,
+    model_artifact: Dict[str, object],
+) -> np.ndarray | None:
+    """
+    Rebuild X in the saved training order for est.effect(X=...).
+    """
+    effect_modifiers = list(model_artifact.get("effect_modifiers", []))
+    if not effect_modifiers:
+        return None
+
+    fill_values = {
+        key: float(value)
+        for key, value in dict(model_artifact.get("feature_fill_values", {})).items()
+    }
+
+    X_df = df.copy()
+    for col in effect_modifiers:
+        if col not in X_df.columns:
+            X_df[col] = np.nan
+        X_df[col] = pd.to_numeric(X_df[col], errors="coerce")
+        X_df[col] = X_df[col].fillna(fill_values.get(col, 0.0))
+
+    return X_df[effect_modifiers].astype(float).to_numpy()
 
 
 def build_background_features(ts: pd.DataFrame) -> pd.DataFrame:
@@ -713,7 +760,7 @@ def fit_one_treatment(
     treatment: str,
     confounders: List[str],
     effect_modifiers: List[str],
-) -> Tuple[CausalForestDML, pd.DataFrame, Dict[str, float], str]:
+) -> Tuple[object, pd.DataFrame, Dict[str, float], str, Dict[str, object]]:
     """
     Fit CATE for one treatment.
 
@@ -752,13 +799,17 @@ def fit_one_treatment(
 
     # Impute confounders and effect modifiers instead of dropping rows
     numeric_cols = list(dict.fromkeys(confounders + effect_modifiers))
+    fill_values: Dict[str, float] = {}
     for col in numeric_cols:
         model_df[col] = pd.to_numeric(model_df[col], errors="coerce")
 
         if model_df[col].isna().all():
-            model_df[col] = 0.0
+            fill_value = 0.0
         else:
-            model_df[col] = model_df[col].fillna(model_df[col].median())
+            fill_value = float(model_df[col].median())
+
+        fill_values[col] = fill_value
+        model_df[col] = model_df[col].fillna(fill_value)
 
     print(f"[{treatment}] rows after filtering/imputation: {len(model_df)}")
 
@@ -840,7 +891,19 @@ def fit_one_treatment(
         "max_normalized_cate": float(out["normalized_CATE"].max()) if out["normalized_CATE"].notna().any() else np.nan,
     }
 
-    return est, out, summary, formula
+    model_artifact = {
+        "estimator": est,
+        "model_type": MODEL_TYPE,
+        "treatment": treatment,
+        "outcome_col": OUTCOME_COL,
+        "confounders": confounders,
+        "effect_modifiers": effect_modifiers,
+        "feature_fill_values": fill_values,
+        "formula": formula,
+        "summary": summary,
+    }
+
+    return est, out, summary, formula, model_artifact
 
 
 # ============================================================
@@ -927,6 +990,7 @@ def write_summary_results(
     summary: Dict[str, float],
     confounder_info: Dict[str, List[str]],
     cate_csv_path: str,
+    model_artifact_path: str,
 ):
     with open(path, "w", encoding="utf-8") as f:
         f.write("=== CATE Summary Results ===\n\n")
@@ -959,6 +1023,7 @@ def write_summary_results(
         f.write(f"Max normalized CATE: {summary['max_normalized_cate']:.6f}\n\n")
 
         f.write(f"Per-patient CATE file: {cate_csv_path}\n")
+        f.write(f"Saved model artifact: {model_artifact_path}\n")
 
 
 # ============================================================
@@ -1040,6 +1105,11 @@ def main():
             treatment=treatment,
             suffix="cate",
         )
+        model_pkl = build_treatment_output_pkl(
+            treatment_dir=treatment_dir,
+            treatment=treatment,
+            suffix="model",
+        )
 
         feature_importance_csv = build_treatment_output_csv(
             treatment_dir=treatment_dir,
@@ -1054,7 +1124,7 @@ def main():
         )
 
         try:
-            est, cate_df, summary, formula = fit_one_treatment(
+            est, cate_df, summary, formula, model_artifact = fit_one_treatment(
                 df=df,
                 treatment=treatment,
                 confounders=confounders,
@@ -1086,6 +1156,7 @@ def main():
                     pass
 
             cate_df.to_csv(cate_csv, index=False)
+            save_model_artifact(model_pkl, model_artifact)
 
             write_summary_results(
                 path=summary_txt,
@@ -1094,6 +1165,7 @@ def main():
                 summary=summary,
                 confounder_info=confounder_info,
                 cate_csv_path=cate_csv,
+                model_artifact_path=model_pkl,
             )
 
             global_summary_rows.append({
@@ -1116,11 +1188,13 @@ def main():
                 "observed_confounders": ", ".join(confounder_info["observed_confounders"]),
                 "missing_graph_candidates": ", ".join(confounder_info["missing_graph_nodes"]),
                 "cate_csv_path": cate_csv,
+                "model_artifact_path": model_pkl,
             })
 
             print(f"Saved: {confounder_txt}")
             print(f"Saved: {summary_txt}")
             print(f"Saved: {cate_csv}")
+            print(f"Saved: {model_pkl}")
 
         except Exception as e:
             with open(summary_txt, "w", encoding="utf-8") as f:

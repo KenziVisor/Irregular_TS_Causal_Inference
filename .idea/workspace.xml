@@ -7,7 +7,9 @@
     <list default="true" id="518a3829-dd69-41b9-8d48-b6bf01057891" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/.name" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/.name" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/DETAILS.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/AGENTS.md" beforeDir="false" afterPath="$PROJECT_DIR$/AGENTS.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/cate_estimation.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/cate_estimation.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mortality_prediction_using_latents.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/mortality_prediction_using_latents.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -36,28 +38,51 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "Python.cate_estimation.executor": "Run",
-    "Python.causal_inference_on_latent_variables.executor": "Run",
-    "Python.causal_inference_on_latent_variables_updated.executor": "Run",
-    "Python.clinically_sufficient_tagging_latent_variables.executor": "Run",
-    "Python.matching_causal_effect.executor": "Run",
-    "Python.mortality_prediction_using_latents.executor": "Run",
-    "Python.optimize_latent_thresholds.executor": "Run",
-    "Python.physionet2012_causal_graph.executor": "Run",
-    "Python.preprocess_physionet_2012 (1).executor": "Run",
-    "Python.preprocess_physionet_2012.executor": "Run",
-    "Python.split_predicted_latent_tags.executor": "Run",
-    "Python.tagging_latent_variables (1).executor": "Run",
-    "Python.tagging_latent_variables.executor": "Run",
-    "Python.treatment_split.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "SHARE_PROJECT_CONFIGURATION_FILES": "true",
-    "git-widget-placeholder": "causal__graph"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;Python.analyze_cate_results.executor&quot;: &quot;Run&quot;,
+    &quot;Python.cate_estimation.executor&quot;: &quot;Run&quot;,
+    &quot;Python.causal_inference_on_latent_variables.executor&quot;: &quot;Run&quot;,
+    &quot;Python.causal_inference_on_latent_variables_updated.executor&quot;: &quot;Run&quot;,
+    &quot;Python.clinically_sufficient_tagging_latent_variables.executor&quot;: &quot;Run&quot;,
+    &quot;Python.matching_causal_effect.executor&quot;: &quot;Run&quot;,
+    &quot;Python.mortality_prediction_using_latents.executor&quot;: &quot;Run&quot;,
+    &quot;Python.optimize_latent_thresholds.executor&quot;: &quot;Run&quot;,
+    &quot;Python.physionet2012_causal_graph.executor&quot;: &quot;Run&quot;,
+    &quot;Python.preprocess_physionet_2012 (1).executor&quot;: &quot;Run&quot;,
+    &quot;Python.preprocess_physionet_2012.executor&quot;: &quot;Run&quot;,
+    &quot;Python.split_predicted_latent_tags.executor&quot;: &quot;Run&quot;,
+    &quot;Python.tagging_latent_variables (1).executor&quot;: &quot;Run&quot;,
+    &quot;Python.tagging_latent_variables.executor&quot;: &quot;Run&quot;,
+    &quot;Python.treatment_split.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;causal__graph&quot;
   }
-}]]></component>
-  <component name="RunManager" selected="Python.split_predicted_latent_tags">
+}</component>
+  <component name="RunManager" selected="Python.analyze_cate_results">
+    <configuration name="analyze_cate_results" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="Irregular_TS_Causal_Inference" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/src" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/src/analyze_cate_results.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
     <configuration name="cate_estimation" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="Irregular_TS_Causal_Inference" />
       <option name="ENV_FILES" value="" />
@@ -94,28 +119,6 @@
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
       <option name="SCRIPT_NAME" value="$PROJECT_DIR$/src/clinically_sufficient_tagging_latent_variables.py" />
-      <option name="PARAMETERS" value="" />
-      <option name="SHOW_COMMAND_LINE" value="false" />
-      <option name="EMULATE_TERMINAL" value="false" />
-      <option name="MODULE_MODE" value="false" />
-      <option name="REDIRECT_INPUT" value="false" />
-      <option name="INPUT_FILE" value="" />
-      <method v="2" />
-    </configuration>
-    <configuration name="matching_causal_effect" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
-      <module name="Irregular_TS_Causal_Inference" />
-      <option name="ENV_FILES" value="" />
-      <option name="INTERPRETER_OPTIONS" value="" />
-      <option name="PARENT_ENVS" value="true" />
-      <envs>
-        <env name="PYTHONUNBUFFERED" value="1" />
-      </envs>
-      <option name="SDK_HOME" value="" />
-      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/src" />
-      <option name="IS_MODULE_SDK" value="true" />
-      <option name="ADD_CONTENT_ROOTS" value="true" />
-      <option name="ADD_SOURCE_ROOTS" value="true" />
-      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/src/matching_causal_effect.py" />
       <option name="PARAMETERS" value="" />
       <option name="SHOW_COMMAND_LINE" value="false" />
       <option name="EMULATE_TERMINAL" value="false" />
@@ -170,11 +173,11 @@
     </configuration>
     <recent_temporary>
       <list>
-        <item itemvalue="Python.split_predicted_latent_tags" />
+        <item itemvalue="Python.analyze_cate_results" />
         <item itemvalue="Python.cate_estimation" />
         <item itemvalue="Python.mortality_prediction_using_latents" />
+        <item itemvalue="Python.split_predicted_latent_tags" />
         <item itemvalue="Python.clinically_sufficient_tagging_latent_variables" />
-        <item itemvalue="Python.matching_causal_effect" />
       </list>
     </recent_temporary>
   </component>

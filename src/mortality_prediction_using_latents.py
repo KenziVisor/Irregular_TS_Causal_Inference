@@ -13,9 +13,9 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 
-latent_tags_csv_path = "../../data/latent_tags_clinical.csv"
+latent_tags_csv_path = "../../data/predicted_latent_tags_230326_absolute_tags.csv"
 physionet_ts_oc_ids_pkl_path = '../../data/processed/physionet2012_ts_oc_ids.pkl'
-results_txt_path = "clinical_mortality_prediction_results.txt"
+results_txt_path = "predicted_230326_mortality_prediction_results.txt"
 
 # =========================
 # 1) Load & merge data
