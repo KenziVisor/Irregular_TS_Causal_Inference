@@ -234,10 +234,12 @@ Known issue:
   - `ChronicRisk`, `AcuteInsult`
 - Missing confounders / modifiers are median-imputed instead of dropping rows.
 - Current code allows overlap between `W` (confounders) and `X` (effect modifiers).
+- The current fit call does not pass `cache_values=True`, so loaded model artifacts do not expose `residuals_` for residual-space post-hoc validation unless they are re-fit.
 - Writes per treatment:
   - `confounder_analysis.txt`
   - `summary_results.txt`
   - `cate.csv`
+  - `<Treatment>_model.pkl` with the fitted estimator plus saved confounders, effect modifiers, and fill values for reuse in another script
   - sometimes `feature_importance.csv`
 - Writes run-level summaries:
   - `global_summary.csv`
@@ -283,6 +285,7 @@ Each run folder contains per-treatment outputs plus `global_summary.csv` and `ma
 - `matching_causal_effect.py` still defaults to the older `latent_tags.csv` path.
 - Several scripts auto-run when imported: preprocess, DAG construction, simple tagging, mortality prediction, and `draft/treatment_split.py`.
 - Default output directories are relative to the process cwd; this is why archived run folders ended up directly under `src/`.
+- Saved CATE model pickles under `data/relevant_outputs/cate_outputs_predicted_230326` were created with a newer stack than the current unpinned Python 3.8 requirements environment: they reference `econml.validate.sensitivity_analysis.SensitivityParams` and `scikit-learn 1.5.1`, so artifact-side validation may require a compatibility shim or a one-time refit fallback.
 
 ## Likely Dependencies
 
