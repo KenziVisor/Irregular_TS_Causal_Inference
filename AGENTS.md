@@ -36,6 +36,7 @@ This is script-first research code, not a package:
 - `src/mortality_prediction_using_latents.py`: mortality prediction from latent tags using Logistic Regression and a small PyTorch MLP. Auto-runs on import.
 - `src/matching_causal_effect.py`: DAG-guided confounder selection + greedy Hamming matching baseline. Guarded.
 - `src/cate_estimation.py`: DAG-guided confounder selection + EconML `CausalForestDML` / `LinearDML`. Guarded. This is the current main causal script.
+- `src/permutations_test.py`: permutation-test orchestration wrapper around `cate_estimation.py`. Calls it via subprocess, reads run-level summary CSVs, keeps only aggregated metrics, and deletes per-trial temp inputs / output dirs immediately.
 - `src/draft/`: older stratification-based ATE/CATE experiments plus a treatment-splitting helper.
 - `src/run_*`: archived `cate_estimation.py` outputs from past runs.
 
@@ -222,10 +223,16 @@ Known issue:
 - Defaults to `../../data/latent_tags_clinical.csv`.
 - Supports `CausalForestDML` and `LinearDML` via `--model-type`.
 - CLI flags:
+  - `--latent-tags-path`
+  - `--physionet-pkl-path`
+  - `--graph-pkl-path`
   - `--output-dir`
   - `--down-sample`
   - `--use-expanded-safe-confounders`
   - `--model-type`
+- The three main input paths plus `OUTPUT_DIR` now resolve via CLI-first, then script-level globals; missing or invalid paths fail clearly before loading.
+- Startup logs now print the resolved input/output paths and a runtime device selection (`cuda` if `torch.cuda.is_available()`, else `cpu`).
+- Important: current EconML / scikit-learn estimators remain CPU-bound in practice, so CUDA selection is provenance/reporting only unless future code adds GPU-aware components.
 - Loads latent tags, outcome, and background features.
 - Uses the DAG for confounder discovery.
 - Uses a fixed preferred set of effect modifiers:
@@ -256,6 +263,14 @@ Known issue:
 - Writes run-level summaries:
   - `benchmark_summary.csv`: cleaned numeric analysis results table with stable `row_id`
   - `control_messages_analyze_cate_results.csv`: source labels / warnings / path fields joinable on `row_id`, `treatment`, `model_type`
+
+### `src/permutations_test.py`
+
+- Runs two sanity-check families by repeatedly calling `src/cate_estimation.py` as an external script:
+  - treatment-column permutations in the latent CSV
+  - outcome permutations via a temporary shuffled PhysioNet pickle
+- Uses the run-level `global_summary.csv` as the source of truth for `mean_cate` and `mean_normalized_cate` and only falls back to another `*global_summary*.csv` if the required columns are missing.
+- Keeps only final aggregate CSV outputs and removes per-trial temporary latent CSVs, shuffled pickles, and trial output directories right after metric extraction.
 
 ## Shared DAG / Confounder Logic In `matching_causal_effect.py` And `cate_estimation.py`
 

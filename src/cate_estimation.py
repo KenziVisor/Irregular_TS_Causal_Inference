@@ -40,6 +40,10 @@ USE_EXPANDED_SAFE_CONFOUNDERS = True
 MODEL_TYPE = "CausalForest"   # LinearDML or CausalForest
 DEFAULT_SENSITIVITY_ALPHA = 0.05
 ARTIFACT_SCHEMA_VERSION = 3
+ESTIMATOR_STACK_DEVICE_NOTE = (
+    "CUDA is available, but the current EconML/scikit-learn estimator stack "
+    "remains CPU-bound here; the selected device is logged for provenance only."
+)
 
 
 def str_to_bool(value: str) -> bool:
@@ -61,9 +65,36 @@ def parse_args() -> argparse.Namespace:
         description="Estimate CATEs for latent clinical treatments."
     )
     parser.add_argument(
+        "--latent-tags-path",
+        default=None,
+        help=(
+            "Path to the latent tags CSV. Default: use script-level "
+            f"LATENT_TAGS_PATH ({LATENT_TAGS_PATH}) if set."
+        ),
+    )
+    parser.add_argument(
+        "--physionet-pkl-path",
+        default=None,
+        help=(
+            "Path to the processed PhysioNet pickle. Default: use script-level "
+            f"PHYSIONET_PKL_PATH ({PHYSIONET_PKL_PATH}) if set."
+        ),
+    )
+    parser.add_argument(
+        "--graph-pkl-path",
+        default=None,
+        help=(
+            "Path to the pickled causal graph. Default: use script-level "
+            f"GRAPH_PKL_PATH ({GRAPH_PKL_PATH}) if set."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
-        default=OUTPUT_DIR,
-        help=f"Directory for run outputs. Default: {OUTPUT_DIR}",
+        default=None,
+        help=(
+            "Directory for run outputs. Default: use script-level "
+            f"OUTPUT_DIR ({OUTPUT_DIR}) if set."
+        ),
     )
     parser.add_argument(
         "--down-sample",
@@ -87,6 +118,106 @@ def parse_args() -> argparse.Namespace:
         help=f"Estimator family to use. Default: {MODEL_TYPE}",
     )
     return parser.parse_args()
+
+
+def resolve_runtime_path(
+    cli_value: str | None,
+    global_value: str | None,
+    field_name: str,
+    *,
+    must_exist: bool = True,
+) -> str:
+    cli_flag_name = {
+        "LATENT_TAGS_PATH": "--latent-tags-path",
+        "PHYSIONET_PKL_PATH": "--physionet-pkl-path",
+        "GRAPH_PKL_PATH": "--graph-pkl-path",
+        "OUTPUT_DIR": "--output-dir",
+    }.get(field_name, field_name)
+
+    raw_value = cli_value if cli_value is not None else global_value
+    if raw_value is None:
+        raise ValueError(
+            f"{field_name} is not configured. Provide {cli_flag_name} or set the "
+            f"script-level {field_name}."
+        )
+
+    if not isinstance(raw_value, str):
+        raise TypeError(f"{field_name} must be a string path. Got: {type(raw_value)!r}")
+
+    raw_value = raw_value.strip()
+    if not raw_value:
+        raise ValueError(
+            f"{field_name} is empty. Provide a non-empty path via {cli_flag_name} "
+            f"or set the script-level {field_name}."
+        )
+
+    resolved_path = os.path.abspath(os.path.expanduser(raw_value))
+
+    if must_exist:
+        if not os.path.exists(resolved_path):
+            raise FileNotFoundError(
+                f"{field_name} does not exist: {resolved_path}. Provide a valid "
+                f"path via {cli_flag_name} or set the script-level {field_name}."
+            )
+        if not os.path.isfile(resolved_path):
+            raise FileNotFoundError(
+                f"{field_name} is not a file: {resolved_path}. Provide a valid file "
+                f"path via {cli_flag_name} or set the script-level {field_name}."
+            )
+    else:
+        if os.path.exists(resolved_path) and not os.path.isdir(resolved_path):
+            raise NotADirectoryError(
+                f"{field_name} must be a directory path: {resolved_path}"
+            )
+
+    return resolved_path
+
+
+def detect_runtime_device() -> Dict[str, object]:
+    info: Dict[str, object] = {
+        "runtime_device_selected": "cpu",
+        "torch_cuda_available": False,
+        "torch_cuda_device_count": 0,
+        "torch_cuda_device_name": None,
+        "runtime_device_note": "CUDA is unavailable; using CPU.",
+    }
+
+    try:
+        import torch
+    except Exception as exc:
+        info["runtime_device_note"] = (
+            f"PyTorch import failed; using CPU. Detail: {type(exc).__name__}: {exc}"
+        )
+        return info
+
+    try:
+        cuda_available = bool(torch.cuda.is_available())
+    except Exception as exc:
+        info["runtime_device_note"] = (
+            "torch.cuda.is_available() failed; using CPU. "
+            f"Detail: {type(exc).__name__}: {exc}"
+        )
+        return info
+
+    info["torch_cuda_available"] = cuda_available
+    if not cuda_available:
+        return info
+
+    info["runtime_device_selected"] = "cuda"
+    info["runtime_device_note"] = ESTIMATOR_STACK_DEVICE_NOTE
+
+    try:
+        info["torch_cuda_device_count"] = int(torch.cuda.device_count())
+    except Exception:
+        info["torch_cuda_device_count"] = None
+
+    try:
+        current_device = torch.cuda.current_device()
+        info["torch_cuda_device_name"] = torch.cuda.get_device_name(current_device)
+    except Exception:
+        info["torch_cuda_device_name"] = None
+
+    return info
 
 
 def build_treatment_output_csv(
@@ -189,6 +320,11 @@ CONTROL_GLOBAL_SUMMARY_COLUMNS = [
     "scipy_version",
     "training_timestamp",
     "platform",
+    "runtime_device_selected",
+    "torch_cuda_available",
+    "torch_cuda_device_count",
+    "torch_cuda_device_name",
+    "runtime_device_note",
     "estimator_module",
     "cache_values_used",
     "has_method_robustness_value",
@@ -211,6 +347,10 @@ CONTROL_GLOBAL_SUMMARY_COLUMNS = [
     "saved_training_residuals_source",
     "saved_training_residuals_error",
     "saved_training_residuals_tuple_length",
+    "latent_tags_path",
+    "physionet_pkl_path",
+    "graph_pkl_path",
+    "output_dir",
     "cate_csv_path",
     "model_artifact_path",
 ]
@@ -327,7 +467,12 @@ def get_installed_version(package_name: str) -> str | None:
         return None
 
 
-def collect_environment_metadata() -> Dict[str, object]:
+def collect_environment_metadata(
+    runtime_device_info: Dict[str, object] | None = None,
+) -> Dict[str, object]:
+    if runtime_device_info is None:
+        runtime_device_info = detect_runtime_device()
+
     return {
         "python_version": sys.version.replace("\n", " "),
         "platform": platform.platform(),
@@ -341,6 +486,11 @@ def collect_environment_metadata() -> Dict[str, object]:
         "optuna_version": get_installed_version("optuna"),
         "torch_version": get_installed_version("torch"),
         "training_timestamp": datetime.now(timezone.utc).isoformat(),
+        "runtime_device_selected": runtime_device_info.get("runtime_device_selected"),
+        "torch_cuda_available": runtime_device_info.get("torch_cuda_available"),
+        "torch_cuda_device_count": runtime_device_info.get("torch_cuda_device_count"),
+        "torch_cuda_device_name": runtime_device_info.get("torch_cuda_device_name"),
+        "runtime_device_note": runtime_device_info.get("runtime_device_note"),
     }
 
 
@@ -358,8 +508,33 @@ def log_environment_metadata(env_metadata: Dict[str, object]) -> None:
         "networkx_version",
         "optuna_version",
         "torch_version",
+        "runtime_device_selected",
+        "torch_cuda_available",
+        "torch_cuda_device_count",
+        "torch_cuda_device_name",
+        "runtime_device_note",
     ]:
         print(f"  {key}: {env_metadata.get(key)}")
+
+
+def log_runtime_configuration(
+    *,
+    latent_tags_path: str,
+    physionet_pkl_path: str,
+    graph_pkl_path: str,
+    output_dir: str,
+    runtime_device_info: Dict[str, object],
+) -> None:
+    print("Runtime configuration:")
+    print(f"  latent_tags_path: {latent_tags_path}")
+    print(f"  physionet_pkl_path: {physionet_pkl_path}")
+    print(f"  graph_pkl_path: {graph_pkl_path}")
+    print(f"  output_dir: {output_dir}")
+    print(
+        "  runtime_device_selected: "
+        f"{runtime_device_info.get('runtime_device_selected')}"
+    )
+    print(f"  runtime_device_note: {runtime_device_info.get('runtime_device_note')}")
 
 
 def has_attribute(obj: object, attr_name: str) -> bool:
@@ -1363,6 +1538,7 @@ def fit_one_treatment(
     treatment: str,
     confounders: List[str],
     effect_modifiers: List[str],
+    runtime_device_info: Dict[str, object],
 ) -> Tuple[object, pd.DataFrame, Dict[str, float], str, Dict[str, object]]:
     """
     Fit CATE for one treatment.
@@ -1534,7 +1710,7 @@ def fit_one_treatment(
             f"{direct_diagnostics['saved_sensitivity_params_error']}"
         )
 
-    env_metadata = collect_environment_metadata()
+    env_metadata = collect_environment_metadata(runtime_device_info=runtime_device_info)
 
     model_artifact = {
         "estimator": est,
@@ -1742,6 +1918,26 @@ def write_summary_results(
         f.write(f"Training timestamp: {model_artifact.get('training_timestamp')}\n")
         f.write(f"Python version: {model_artifact.get('python_version')}\n")
         f.write(f"Platform: {model_artifact.get('platform')}\n")
+        f.write(
+            "Runtime device selected: "
+            f"{model_artifact.get('runtime_device_selected')}\n"
+        )
+        f.write(
+            "torch CUDA available: "
+            f"{model_artifact.get('torch_cuda_available')}\n"
+        )
+        f.write(
+            "torch CUDA device count: "
+            f"{model_artifact.get('torch_cuda_device_count')}\n"
+        )
+        f.write(
+            "torch CUDA device name: "
+            f"{model_artifact.get('torch_cuda_device_name')}\n"
+        )
+        f.write(
+            "Runtime device note: "
+            f"{model_artifact.get('runtime_device_note')}\n"
+        )
         f.write(f"EconML version: {model_artifact.get('econml_version')}\n")
         f.write(f"scikit-learn version: {model_artifact.get('sklearn_version')}\n")
         f.write(f"NumPy version: {model_artifact.get('numpy_version')}\n")
@@ -1834,17 +2030,53 @@ def write_summary_results(
 # Main loop
 # ============================================================
 def main():
-    global OUTPUT_DIR, DOWN_SAMPLE, USE_EXPANDED_SAFE_CONFOUNDERS, MODEL_TYPE
+    global LATENT_TAGS_PATH
+    global PHYSIONET_PKL_PATH
+    global GRAPH_PKL_PATH
+    global OUTPUT_DIR
+    global DOWN_SAMPLE
+    global USE_EXPANDED_SAFE_CONFOUNDERS
+    global MODEL_TYPE
 
     args = parse_args()
-    OUTPUT_DIR = args.output_dir
+    LATENT_TAGS_PATH = resolve_runtime_path(
+        args.latent_tags_path,
+        LATENT_TAGS_PATH,
+        "LATENT_TAGS_PATH",
+    )
+    PHYSIONET_PKL_PATH = resolve_runtime_path(
+        args.physionet_pkl_path,
+        PHYSIONET_PKL_PATH,
+        "PHYSIONET_PKL_PATH",
+    )
+    GRAPH_PKL_PATH = resolve_runtime_path(
+        args.graph_pkl_path,
+        GRAPH_PKL_PATH,
+        "GRAPH_PKL_PATH",
+    )
+    OUTPUT_DIR = resolve_runtime_path(
+        args.output_dir,
+        OUTPUT_DIR,
+        "OUTPUT_DIR",
+        must_exist=False,
+    )
     DOWN_SAMPLE = args.down_sample
     USE_EXPANDED_SAFE_CONFOUNDERS = args.use_expanded_safe_confounders
     MODEL_TYPE = args.model_type
 
     warnings.filterwarnings("ignore", category=FutureWarning)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    startup_env_metadata = collect_environment_metadata()
+    runtime_device_info = detect_runtime_device()
+    log_runtime_configuration(
+        latent_tags_path=LATENT_TAGS_PATH,
+        physionet_pkl_path=PHYSIONET_PKL_PATH,
+        graph_pkl_path=GRAPH_PKL_PATH,
+        output_dir=OUTPUT_DIR,
+        runtime_device_info=runtime_device_info,
+    )
+    startup_env_metadata = collect_environment_metadata(
+        runtime_device_info=runtime_device_info,
+    )
     log_environment_metadata(startup_env_metadata)
 
     print("Loading dataframe and graph...")
@@ -1935,7 +2167,13 @@ def main():
                 treatment=treatment,
                 confounders=confounders,
                 effect_modifiers=effect_modifiers,
+                runtime_device_info=runtime_device_info,
             )
+
+            model_artifact["latent_tags_path"] = LATENT_TAGS_PATH
+            model_artifact["physionet_pkl_path"] = PHYSIONET_PKL_PATH
+            model_artifact["graph_pkl_path"] = GRAPH_PKL_PATH
+            model_artifact["output_dir"] = OUTPUT_DIR
 
             # ====================================================
             # Feature importance for CATE heterogeneity
@@ -2003,6 +2241,11 @@ def main():
                 "scipy_version": model_artifact["scipy_version"],
                 "training_timestamp": model_artifact["training_timestamp"],
                 "platform": model_artifact["platform"],
+                "runtime_device_selected": model_artifact["runtime_device_selected"],
+                "torch_cuda_available": model_artifact["torch_cuda_available"],
+                "torch_cuda_device_count": model_artifact["torch_cuda_device_count"],
+                "torch_cuda_device_name": model_artifact["torch_cuda_device_name"],
+                "runtime_device_note": model_artifact["runtime_device_note"],
                 "estimator_module": model_artifact["estimator_module"],
                 "estimator_class": model_artifact["estimator_class"],
                 "cache_values_used": model_artifact["cache_values_used"],
@@ -2056,6 +2299,10 @@ def main():
                 "saved_training_residuals_tuple_length": model_artifact[
                     "saved_training_residuals_tuple_length"
                 ],
+                "latent_tags_path": model_artifact["latent_tags_path"],
+                "physionet_pkl_path": model_artifact["physionet_pkl_path"],
+                "graph_pkl_path": model_artifact["graph_pkl_path"],
+                "output_dir": model_artifact["output_dir"],
                 "cate_csv_path": cate_csv,
                 "model_artifact_path": model_pkl,
             })
