@@ -14,7 +14,7 @@ The main idea is:
 This is script-first research code, not a package:
 
 - `main.py` is empty
-- there is no dependency manifest (`requirements.txt`, `pyproject.toml`, `environment.yml`, etc.)
+- `requirements.txt` now exists and pins the WSL analysis stack used for the current sensitivity pipeline
 - there is no test suite
 
 ## Read This First
@@ -234,7 +234,8 @@ Known issue:
   - `ChronicRisk`, `AcuteInsult`
 - Missing confounders / modifiers are median-imputed instead of dropping rows.
 - Current code allows overlap between `W` (confounders) and `X` (effect modifiers).
-- The current fit call does not pass `cache_values=True`, so loaded model artifacts do not expose `residuals_` for residual-space post-hoc validation unless they are re-fit.
+- The fit call now passes `cache_values=True`, and saved artifacts include `cache_values_used`, estimator class, exact confounder / effect-modifier order, and a `direct_diagnostics` block for easy post-hoc reuse.
+- Default output dir is now `../../data/relevant_outputs/cate_outputs_predicted_230326` when the script is run from `src/`, which aligns it with `analyze_cate_results.py`.
 - Writes per treatment:
   - `confounder_analysis.txt`
   - `summary_results.txt`
@@ -242,8 +243,19 @@ Known issue:
   - `<Treatment>_model.pkl` with the fitted estimator plus saved confounders, effect modifiers, and fill values for reuse in another script
   - sometimes `feature_importance.csv`
 - Writes run-level summaries:
-  - `global_summary.csv`
+  - `global_summary.csv`: cleaned run-level results table with stable `row_id`
+  - `control_messages_cate_estimation.csv`: provenance / diagnostic / path fields joinable on `row_id`, `treatment`, `model_type`
   - `manager_global_summary.csv`
+
+### `src/analyze_cate_results.py`
+
+- Reads the saved `<Treatment>_model.pkl` artifacts under the CATE output directory and recomputes / validates sensitivity outputs, benchmark proxy scores, and contour artifacts.
+- Writes per treatment:
+  - `<Treatment>_benchmark_scores.csv`
+  - `<Treatment>_benchmark_report.txt`
+- Writes run-level summaries:
+  - `benchmark_summary.csv`: cleaned numeric analysis results table with stable `row_id`
+  - `control_messages_analyze_cate_results.csv`: source labels / warnings / path fields joinable on `row_id`, `treatment`, `model_type`
 
 ## Shared DAG / Confounder Logic In `matching_causal_effect.py` And `cate_estimation.py`
 
@@ -286,6 +298,10 @@ Each run folder contains per-treatment outputs plus `global_summary.csv` and `ma
 - Several scripts auto-run when imported: preprocess, DAG construction, simple tagging, mortality prediction, and `draft/treatment_split.py`.
 - Default output directories are relative to the process cwd; this is why archived run folders ended up directly under `src/`.
 - Saved CATE model pickles under `data/relevant_outputs/cate_outputs_predicted_230326` were created with a newer stack than the current unpinned Python 3.8 requirements environment: they reference `econml.validate.sensitivity_analysis.SensitivityParams` and `scikit-learn 1.5.1`, so artifact-side validation may require a compatibility shim or a one-time refit fallback.
+- In the older WSL `econml310` env with `econml 0.15.1`, loaded `LinearDML` / `CausalForestDML` estimators exposed `residuals_` and `summary()` when trained with `cache_values=True`, but they did not expose estimator-native `robustness_value()`, `sensitivity_summary()`, or `sensitivity_interval()`. That version mismatch was the main reason the old sensitivity pipeline fell back to manual calculations.
+- Sensitivity-analysis APIs (`robustness_value`, `sensitivity_interval`, `sensitivity_summary`) are available on fresh and loaded `LinearDML` / `CausalForestDML` estimators in the pinned `econml310` WSL env only after upgrading to `econml==0.16.0`; they are absent in `econml==0.15.1`.
+- Current schema-v3 CATE artifacts written by `src/cate_estimation.py` save training-time direct RV / interval / summary values plus residual metadata explicitly, and `src/analyze_cate_results.py` prefers those saved training-direct values before trying loaded-estimator direct calls, compatibility refits, or manual fallback paths.
+- In the current `econml==0.16.0` env, fitted estimators still do not expose raw non-callable sensitivity-parameter attributes or a direct `sensitivity_plot()` API, so contour plots and the secondary theta-RV path still come from clearly labeled residual-space fallback logic rather than serialized native sensitivity params; Stage 2 real benchmark remains `unimplemented_by_design`.
 
 ## Likely Dependencies
 

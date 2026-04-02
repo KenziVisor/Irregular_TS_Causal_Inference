@@ -27,6 +27,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 LATENT_TAGS_PATH = "../../data/predicted_latent_tags_230326_absolute_tags.csv"
 PHYSIONET_PKL_PATH = "../../data/processed/physionet2012_ts_oc_ids.pkl"
 CATE_RESULTS_DIR = "../../data/relevant_outputs/cate_outputs_predicted_230326"
+PREFERRED_ENV_NAME = "econml310"
 
 TOP_K_BENCHMARK_CONFOUNDERS = 1
 SEED = 42
@@ -43,32 +44,74 @@ ALLOWED_TOP_K_VALUES = {1, 3}
 BENCHMARK_SCORE_COLUMNS = [
     "rank",
     "confounder",
-    "cf_y",
-    "cf_d",
-    "strength_score",
-    "selected_as_benchmark",
-    "is_primary_benchmark",
+    "proxy_cf_y",
+    "proxy_cf_d",
+    "proxy_strength_score",
+    "selected_as_candidate",
+    "is_primary_candidate",
 ]
 
-RUN_SUMMARY_COLUMNS = [
+CLEAN_RUN_SUMMARY_COLUMNS = [
+    "row_id",
     "treatment",
     "model_type",
+    "estimator_class",
     "RV",
+    "direct_rv",
+    "sensitivity_interval",
+    "sensitivity_interval_lb",
+    "sensitivity_interval_ub",
+    "direct_sensitivity_interval",
+    "direct_sensitivity_interval_lb",
+    "direct_sensitivity_interval_ub",
+    "direct_sensitivity_summary_available",
+    "proxy_primary_candidate",
+    "proxy_cf_y",
+    "proxy_cf_d",
+    "proxy_strength_score",
+    "proxy_robustness_ratio",
     "selected_benchmark_confounder",
-    "benchmark_cf_y",
-    "benchmark_cf_d",
-    "benchmark_strength_score",
+    "real_benchmark_strength_score",
     "robustness_ratio",
+    "analysis_rows",
+    "residual_rows",
+]
+
+CONTROL_RUN_SUMMARY_COLUMNS = [
+    "row_id",
+    "treatment",
+    "model_type",
+    "estimator_class",
+    "model_loaded_in_econml310",
+    "cache_values_used",
+    "saved_training_residuals_available",
+    "saved_training_residuals_source",
+    "rv_source",
+    "sensitivity_interval_source",
+    "sensitivity_summary_source",
+    "estimator_summary_source",
+    "residual_source",
+    "real_benchmark_available",
+    "real_benchmark_cf_y",
+    "real_benchmark_cf_d",
+    "real_benchmark_source",
+    "contour_source",
     "contour_plot_path",
     "run_status",
     "report_path",
     "benchmark_scores_path",
-    "analysis_rows",
-    "residual_rows",
     "warnings",
 ]
 
 SensitivityParams = namedtuple("SensitivityParams", ["theta", "sigma", "nu", "cov"])
+
+DIRECT_SENSITIVITY_SOURCE_ORDER = [
+    "saved_training_direct",
+    "loaded_estimator_direct",
+    "compatibility_refit_direct",
+    "saved_training_params_reconstructed",
+    "fallback_manual",
+]
 
 
 def resolve_script_path(path_like: str | Path) -> Path:
@@ -89,6 +132,24 @@ def build_treatment_output_path(
 
 def build_run_output_csv(output_dir: Path, suffix: str) -> Path:
     return output_dir / f"{output_dir.name}_{suffix}.csv"
+
+
+def build_summary_row_id(model_type: str, treatment: str) -> str:
+    safe_model_type = model_type or "unknown_model"
+    return f"{safe_model_type}__{treatment}"
+
+
+def finalize_rows(
+    rows: Sequence[Dict[str, Any]],
+    fieldnames: Sequence[str],
+) -> List[Dict[str, Any]]:
+    finalized_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        finalized_rows.append({
+            field: row.get(field)
+            for field in fieldnames
+        })
+    return finalized_rows
 
 
 def format_exception(exc: Exception) -> str:
@@ -149,7 +210,7 @@ def dedupe_preserve_order(items: Sequence[str]) -> List[str]:
     return out
 
 
-def install_sensitivity_pickle_shim() -> None:
+def install_legacy_sensitivity_pickle_shim() -> None:
     try:
         import econml.validate.sensitivity_analysis  # type: ignore  # noqa: F401
         return
@@ -219,19 +280,43 @@ def load_analysis_dataframe(
 
 
 def load_model_artifact(path: Path) -> Tuple[Dict[str, Any], List[str]]:
-    install_sensitivity_pickle_shim()
+    artifact = None
+    warning_messages: List[str] = []
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with open(path, "rb") as f:
-            artifact = pickle.load(f)
+        try:
+            with open(path, "rb") as f:
+                artifact = pickle.load(f)
+        except ModuleNotFoundError as exc:
+            if exc.name != "econml.validate.sensitivity_analysis":
+                raise
+            install_legacy_sensitivity_pickle_shim()
+            warning_messages.append(
+                "Used legacy pickle shim for econml.validate.sensitivity_analysis during artifact load."
+            )
+            with open(path, "rb") as f:
+                artifact = pickle.load(f)
 
     if not isinstance(artifact, dict):
         raise TypeError(f"Model artifact is not a dict: {path}")
 
-    warning_messages = []
     for item in caught:
         warning_messages.append(str(item.message))
     return artifact, dedupe_preserve_order(warning_messages)
+
+
+def artifact_value_with_fallback(
+    artifact: Dict[str, Any],
+    key: str,
+    *fallback_keys: str,
+) -> Any:
+    direct = dict(artifact.get("direct_diagnostics", {}))
+    for candidate in (key, *fallback_keys):
+        if candidate in artifact:
+            return artifact.get(candidate)
+        if candidate in direct:
+            return direct.get(candidate)
+    return None
 
 
 def validate_artifact(artifact: Dict[str, Any]) -> Dict[str, Any]:
@@ -250,17 +335,279 @@ def validate_artifact(artifact: Dict[str, Any]) -> Dict[str, Any]:
     if missing:
         raise KeyError(f"Artifact missing keys: {missing}")
 
+    direct_diagnostics = dict(artifact.get("direct_diagnostics", {}))
     return {
         "estimator": artifact["estimator"],
+        "artifact_schema_version": int(artifact.get("artifact_schema_version", 1)),
+        "python_version": str(artifact.get("python_version", "")),
+        "platform": str(artifact.get("platform", "")),
+        "econml_version": str(artifact.get("econml_version", "")),
+        "sklearn_version": str(artifact.get("sklearn_version", "")),
+        "numpy_version": str(artifact.get("numpy_version", "")),
+        "pandas_version": str(artifact.get("pandas_version", "")),
+        "scipy_version": str(artifact.get("scipy_version", "")),
+        "training_timestamp": str(artifact.get("training_timestamp", "")),
         "model_type": str(artifact["model_type"]),
         "treatment": str(artifact["treatment"]),
         "outcome_col": str(artifact["outcome_col"]),
         "confounders": list(artifact.get("confounders", [])),
         "effect_modifiers": list(artifact.get("effect_modifiers", [])),
+        "cache_values_used": bool(artifact.get("cache_values_used", False)),
+        "estimator_module": str(
+            artifact.get("estimator_module", type(artifact["estimator"]).__module__)
+        ),
+        "estimator_class": str(
+            artifact.get("estimator_class", type(artifact["estimator"]).__name__)
+        ),
+        "confounders_order": list(
+            artifact.get("confounders_order", artifact.get("confounders", []))
+        ),
+        "effect_modifiers_order": list(
+            artifact.get("effect_modifiers_order", artifact.get("effect_modifiers", []))
+        ),
         "feature_fill_values": dict(artifact.get("feature_fill_values", {})),
         "formula": str(artifact.get("formula", "")),
         "summary": dict(artifact.get("summary", {})),
+        "has_method_robustness_value": bool(
+            artifact_value_with_fallback(artifact, "has_method_robustness_value")
+        ),
+        "has_method_sensitivity_interval": bool(
+            artifact_value_with_fallback(artifact, "has_method_sensitivity_interval")
+        ),
+        "has_method_sensitivity_summary": bool(
+            artifact_value_with_fallback(artifact, "has_method_sensitivity_summary")
+        ),
+        "has_method_summary": bool(
+            artifact_value_with_fallback(artifact, "has_method_summary")
+        ),
+        "has_attr_residuals": bool(
+            artifact_value_with_fallback(artifact, "has_attr_residuals")
+        ),
+        "saved_direct_rv": artifact_value_with_fallback(
+            artifact, "saved_direct_rv", "direct_robustness_value"
+        ),
+        "saved_direct_rv_source": maybe_string(
+            artifact_value_with_fallback(
+                artifact, "saved_direct_rv_source", "direct_robustness_value_source"
+            )
+        ),
+        "saved_direct_rv_error": maybe_string(
+            artifact_value_with_fallback(
+                artifact, "saved_direct_rv_error", "direct_robustness_value_error"
+            )
+        ),
+        "saved_direct_sensitivity_interval": artifact_value_with_fallback(
+            artifact, "saved_direct_sensitivity_interval", "direct_sensitivity_interval"
+        ),
+        "saved_direct_sensitivity_interval_source": maybe_string(
+            artifact_value_with_fallback(
+                artifact,
+                "saved_direct_sensitivity_interval_source",
+                "direct_sensitivity_interval_source",
+            )
+        ),
+        "saved_direct_sensitivity_interval_error": maybe_string(
+            artifact_value_with_fallback(
+                artifact,
+                "saved_direct_sensitivity_interval_error",
+                "direct_sensitivity_interval_error",
+            )
+        ),
+        "saved_direct_sensitivity_summary": artifact_value_with_fallback(
+            artifact, "saved_direct_sensitivity_summary", "direct_sensitivity_summary"
+        ),
+        "saved_direct_sensitivity_summary_source": maybe_string(
+            artifact_value_with_fallback(
+                artifact,
+                "saved_direct_sensitivity_summary_source",
+                "direct_sensitivity_summary_source",
+            )
+        ),
+        "saved_direct_sensitivity_summary_error": maybe_string(
+            artifact_value_with_fallback(
+                artifact,
+                "saved_direct_sensitivity_summary_error",
+                "direct_sensitivity_summary_error",
+            )
+        ),
+        "saved_direct_estimator_summary_text": maybe_string(
+            artifact_value_with_fallback(
+                artifact,
+                "saved_direct_estimator_summary_text",
+                "direct_estimator_summary_text",
+            )
+        ),
+        "saved_direct_estimator_summary_source": maybe_string(
+            artifact_value_with_fallback(
+                artifact,
+                "saved_direct_estimator_summary_source",
+                "direct_estimator_summary_source",
+            )
+        ),
+        "saved_direct_estimator_summary_error": maybe_string(
+            artifact_value_with_fallback(
+                artifact,
+                "saved_direct_estimator_summary_error",
+                "direct_estimator_summary_error",
+            )
+        ),
+        "saved_sensitivity_params_available": bool(
+            artifact_value_with_fallback(artifact, "saved_sensitivity_params_available")
+        ),
+        "saved_sensitivity_params_source": maybe_string(
+            artifact_value_with_fallback(artifact, "saved_sensitivity_params_source")
+        ),
+        "saved_sensitivity_params_error": maybe_string(
+            artifact_value_with_fallback(artifact, "saved_sensitivity_params_error")
+        ),
+        "saved_sensitivity_params_serialized": artifact_value_with_fallback(
+            artifact, "saved_sensitivity_params_serialized"
+        ),
+        "saved_training_residuals_available": bool(
+            artifact_value_with_fallback(artifact, "saved_training_residuals_available")
+        ),
+        "saved_training_residuals_source": maybe_string(
+            artifact_value_with_fallback(artifact, "saved_training_residuals_source")
+        ),
+        "saved_training_residuals_error": maybe_string(
+            artifact_value_with_fallback(artifact, "saved_training_residuals_error")
+        ),
+        "saved_training_residuals_tuple_length": artifact_value_with_fallback(
+            artifact, "saved_training_residuals_tuple_length"
+        ),
+        "direct_diagnostics": direct_diagnostics,
     }
+
+
+def normalize_interval_or_none(
+    value: Any,
+) -> Tuple[Tuple[float | None, float | None] | None, str | None]:
+    if not metric_has_value(value):
+        return None, None
+    try:
+        return normalize_interval_value(value), None
+    except Exception as exc:
+        return None, format_exception(exc)
+
+
+def sensitivity_params_from_serialized(value: Any) -> SensitivityParams:
+    payload = value
+    if isinstance(payload, SensitivityParams):
+        return payload
+    if isinstance(payload, dict) and "attributes" in payload:
+        payload = payload["attributes"]
+    if not isinstance(payload, dict):
+        raise TypeError("Serialized sensitivity params must be a dict-like object")
+
+    theta = payload.get("theta")
+    sigma = payload.get("sigma", payload.get("sigma2"))
+    nu = payload.get("nu", payload.get("nu2"))
+    cov = payload.get("cov", payload.get("covariance"))
+
+    missing = [
+        key for key, item in {
+            "theta": theta,
+            "sigma": sigma,
+            "nu": nu,
+            "cov": cov,
+        }.items()
+        if item is None
+    ]
+    if missing:
+        raise KeyError(f"Serialized sensitivity params missing fields: {missing}")
+
+    return SensitivityParams(
+        theta=np.asarray(theta, dtype=float),
+        sigma=np.asarray(sigma, dtype=float),
+        nu=np.asarray(nu, dtype=float),
+        cov=np.asarray(cov, dtype=float),
+    )
+
+
+def extract_saved_training_direct_metrics(artifact: Dict[str, Any]) -> Dict[str, Any]:
+    interval_value, interval_error = normalize_interval_or_none(
+        artifact.get("saved_direct_sensitivity_interval")
+    )
+
+    out = {
+        "rv": None,
+        "rv_source": "",
+        "rv_error": maybe_string(artifact.get("saved_direct_rv_error")),
+        "interval": interval_value,
+        "interval_source": "",
+        "interval_error": interval_error or maybe_string(
+            artifact.get("saved_direct_sensitivity_interval_error")
+        ),
+        "summary_text": maybe_string(artifact.get("saved_direct_sensitivity_summary")),
+        "summary_source": "",
+        "summary_error": maybe_string(
+            artifact.get("saved_direct_sensitivity_summary_error")
+        ),
+        "estimator_summary_text": maybe_string(
+            artifact.get("saved_direct_estimator_summary_text")
+        ),
+        "estimator_summary_source": "",
+        "estimator_summary_error": maybe_string(
+            artifact.get("saved_direct_estimator_summary_error")
+        ),
+    }
+
+    if metric_has_value(artifact.get("saved_direct_rv")):
+        try:
+            out["rv"] = coerce_float(artifact.get("saved_direct_rv"))
+        except Exception as exc:
+            out["rv_error"] = format_exception(exc)
+        else:
+            out["rv_source"] = maybe_string(artifact.get("saved_direct_rv_source"))
+            out["rv_error"] = ""
+
+    if metric_has_value(interval_value):
+        out["interval_source"] = maybe_string(
+            artifact.get("saved_direct_sensitivity_interval_source")
+        )
+
+    if out["summary_text"]:
+        out["summary_source"] = maybe_string(
+            artifact.get("saved_direct_sensitivity_summary_source")
+        )
+
+    if out["estimator_summary_text"]:
+        out["estimator_summary_source"] = maybe_string(
+            artifact.get("saved_direct_estimator_summary_source")
+        )
+
+    return out
+
+
+def empty_sensitivity_metrics() -> Dict[str, Any]:
+    return {
+        "rv": None,
+        "rv_source": "",
+        "rv_error": "",
+        "interval": None,
+        "interval_source": "",
+        "interval_error": "",
+        "summary_text": "",
+        "summary_source": "",
+        "summary_error": "",
+        "estimator_summary_text": "",
+        "estimator_summary_source": "",
+        "estimator_summary_error": "",
+        "rv_theta": None,
+        "rv_theta_source": "",
+    }
+
+
+def metric_selected_from_source(
+    candidate: Dict[str, Any],
+    value_key: str,
+    source_key: str,
+    allowed_sources: Sequence[str],
+) -> bool:
+    return (
+        metric_has_value(candidate.get(value_key))
+        and maybe_string(candidate.get(source_key)) in set(allowed_sources)
+    )
 
 
 def prepare_treatment_matrices_from_artifact(
@@ -269,8 +616,10 @@ def prepare_treatment_matrices_from_artifact(
 ) -> Dict[str, Any]:
     treatment = model_artifact["treatment"]
     outcome_col = model_artifact["outcome_col"]
-    confounders = list(model_artifact["confounders"])
-    effect_modifiers = list(model_artifact["effect_modifiers"])
+    confounders = list(model_artifact.get("confounders_order", model_artifact["confounders"]))
+    effect_modifiers = list(
+        model_artifact.get("effect_modifiers_order", model_artifact["effect_modifiers"])
+    )
     fill_values = dict(model_artifact.get("feature_fill_values", {}))
 
     if treatment not in df.columns:
@@ -329,6 +678,63 @@ def prepare_treatment_matrices_from_artifact(
         "created_missing_columns": created_missing_columns,
         "fill_map": fill_map,
     }
+
+
+def metric_has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple)):
+        return any(metric_has_value(item) for item in value)
+    return True
+
+
+def normalize_interval_value(value: Any) -> Tuple[float | None, float | None] | None:
+    if value is None:
+        return None
+
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return (coerce_float(value[0]), coerce_float(value[1]))
+
+    raise ValueError("Expected sensitivity interval to be a 2-item tuple/list")
+
+
+def interval_bounds_or_none(
+    value: Any,
+) -> Tuple[float | None, float | None]:
+    if not metric_has_value(value):
+        return None, None
+    try:
+        normalized = normalize_interval_value(value)
+    except Exception:
+        return None, None
+    if normalized is None:
+        return None, None
+    return normalized
+
+
+def build_clean_run_summary_row(summary_row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        field: summary_row.get(field)
+        for field in CLEAN_RUN_SUMMARY_COLUMNS
+    }
+
+
+def build_control_run_summary_row(summary_row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        field: summary_row.get(field)
+        for field in CONTROL_RUN_SUMMARY_COLUMNS
+    }
+
+
+def maybe_string(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value)
 
 
 def make_dml_estimator(model_type: str) -> Any:
@@ -411,6 +817,76 @@ def try_method_calls(
     if last_error is None:
         return None, f"Unable to call '{method_name}'"
     return None, format_exception(last_error)
+
+
+def extract_estimator_direct_metrics(
+    est: Any,
+    effect_modifiers: Sequence[str],
+    source_label: str,
+) -> Dict[str, Any]:
+    rv_loaded, rv_loaded_error = try_method_calls(
+        est,
+        "robustness_value",
+        [{}, {"null_hypothesis": 0.0, "alpha": DEFAULT_SENSITIVITY_ALPHA}],
+    )
+    summary_loaded, summary_loaded_error = try_method_calls(
+        est,
+        "sensitivity_summary",
+        [{}, {"null_hypothesis": 0.0, "alpha": DEFAULT_SENSITIVITY_ALPHA}],
+    )
+    interval_loaded, interval_loaded_error = try_method_calls(
+        est,
+        "sensitivity_interval",
+        [{}, {"alpha": DEFAULT_SENSITIVITY_ALPHA, "interval_type": "ci"}],
+    )
+
+    interval_value = None
+    if interval_loaded is not None:
+        try:
+            interval_value = normalize_interval_value(interval_loaded)
+            interval_loaded_error = None
+        except Exception as exc:
+            interval_loaded_error = format_exception(exc)
+
+    estimator_summary_text = ""
+    estimator_summary_error = None
+    if hasattr(est, "summary") and callable(getattr(est, "summary", None)):
+        try:
+            estimator_summary_text = str(
+                est.summary(feature_names=list(effect_modifiers) or None)
+            )
+        except Exception as exc:
+            estimator_summary_error = format_exception(exc)
+            try:
+                estimator_summary_text = str(est.summary())
+                estimator_summary_error = None
+            except Exception as nested_exc:
+                estimator_summary_error = format_exception(nested_exc)
+    else:
+        estimator_summary_error = "Estimator does not expose 'summary'"
+
+    rv_value = None
+    if rv_loaded is not None:
+        try:
+            rv_value = coerce_float(rv_loaded)
+            rv_loaded_error = None
+        except Exception as exc:
+            rv_loaded_error = format_exception(exc)
+
+    return {
+        "rv": rv_value,
+        "rv_source": source_label if rv_value is not None else "",
+        "rv_error": maybe_string(rv_loaded_error),
+        "interval": interval_value,
+        "interval_source": source_label if interval_value is not None else "",
+        "interval_error": maybe_string(interval_loaded_error),
+        "summary_text": str(summary_loaded) if summary_loaded is not None else "",
+        "summary_source": source_label if summary_loaded is not None else "",
+        "summary_error": maybe_string(summary_loaded_error),
+        "estimator_summary_text": estimator_summary_text,
+        "estimator_summary_source": source_label if estimator_summary_text else "",
+        "estimator_summary_error": maybe_string(estimator_summary_error),
+    }
 
 
 def to_1d_float_array(values: Any) -> np.ndarray:
@@ -597,6 +1073,7 @@ def build_sensitivity_summary_text(
     c_y: float = DEFAULT_SENSITIVITY_C_Y,
     c_t: float = DEFAULT_SENSITIVITY_C_T,
     rho: float = DEFAULT_SENSITIVITY_RHO,
+    source_label: str = "fallback_manual",
 ) -> str:
     ci_lb, ci_ub = sensitivity_interval_from_params(
         params=params,
@@ -628,11 +1105,17 @@ def build_sensitivity_summary_text(
         interval_type="ci",
     )
 
-    lines = [
-        (
-            "Fallback sensitivity summary from residual-space params "
-            f"(c_y={c_y}, c_t={c_t}, rho={rho}, alpha={alpha})"
+    header = {
+        "saved_training_params_reconstructed": (
+            "Sensitivity summary reconstructed from saved training sensitivity parameters"
         ),
+        "fallback_manual": (
+            "Fallback sensitivity summary from residual-space params"
+        ),
+    }.get(source_label, f"Sensitivity summary from {source_label}")
+
+    lines = [
+        f"{header} (c_y={c_y}, c_t={c_t}, rho={rho}, alpha={alpha})",
         f"CI Lower: {ci_lb:.6f}",
         f"Theta Lower: {theta_lb:.6f}",
         f"Theta: {theta:.6f}",
@@ -645,92 +1128,152 @@ def build_sensitivity_summary_text(
     return "\n".join(lines)
 
 
-def extract_sensitivity_outputs(
-    est: Any,
-    sensitivity_params: SensitivityParams | None = None,
-) -> Dict[str, Any]:
-    rv, rv_error = try_method_calls(
-        est,
-        "robustness_value",
-        [{}, {"null_hypothesis": 0.0, "alpha": DEFAULT_SENSITIVITY_ALPHA}],
-    )
-    summary_obj, summary_error = try_method_calls(
-        est,
-        "sensitivity_summary",
-        [{}, {"null_hypothesis": 0.0, "alpha": DEFAULT_SENSITIVITY_ALPHA}],
-    )
-    interval_obj, interval_error = try_method_calls(
-        est,
-        "sensitivity_interval",
-        [{}, {"alpha": DEFAULT_SENSITIVITY_ALPHA, "interval_type": "ci"}],
-    )
+def reconstruct_saved_training_sensitivity_params(
+    artifact: Dict[str, Any],
+) -> Tuple[SensitivityParams | None, str | None]:
+    if not artifact.get("saved_sensitivity_params_available", False):
+        return None, maybe_string(artifact.get("saved_sensitivity_params_error"))
 
-    out = {
-        "rv": None,
-        "rv_theta": None,
-        "rv_error": rv_error,
-        "summary_text": str(summary_obj) if summary_obj is not None else "",
-        "summary_error": summary_error,
-        "interval": None,
-        "interval_error": interval_error,
-        "source": "official_api",
+    serialized = artifact.get("saved_sensitivity_params_serialized")
+    if serialized is None:
+        return None, "Saved sensitivity params were marked available but no serialized payload was stored"
+
+    try:
+        return sensitivity_params_from_serialized(serialized), None
+    except Exception as exc:
+        return None, format_exception(exc)
+
+
+def build_params_based_metrics(
+    sensitivity_params: SensitivityParams | None,
+    source_label: str,
+) -> Dict[str, Any]:
+    if sensitivity_params is None:
+        return {
+            "rv": None,
+            "rv_source": "",
+            "rv_error": "",
+            "interval": None,
+            "interval_source": "",
+            "interval_error": "",
+            "summary_text": "",
+            "summary_source": "",
+            "summary_error": "",
+            "estimator_summary_text": "",
+            "estimator_summary_source": "",
+            "estimator_summary_error": "",
+            "rv_theta": None,
+            "rv_theta_source": "",
+        }
+
+    return {
+        "rv": robustness_value_from_params(
+            params=sensitivity_params,
+            alpha=DEFAULT_SENSITIVITY_ALPHA,
+            null_hypothesis=0.0,
+            interval_type="ci",
+        ),
+        "rv_source": source_label,
+        "rv_error": "",
+        "interval": sensitivity_interval_from_params(
+            params=sensitivity_params,
+            alpha=DEFAULT_SENSITIVITY_ALPHA,
+            c_y=DEFAULT_SENSITIVITY_C_Y,
+            c_t=DEFAULT_SENSITIVITY_C_T,
+            rho=DEFAULT_SENSITIVITY_RHO,
+            interval_type="ci",
+        ),
+        "interval_source": source_label,
+        "interval_error": "",
+        "summary_text": build_sensitivity_summary_text(
+            sensitivity_params,
+            source_label=source_label,
+        ),
+        "summary_source": source_label,
+        "summary_error": "",
+        "estimator_summary_text": "",
+        "estimator_summary_source": "",
+        "estimator_summary_error": "",
+        "rv_theta": robustness_value_from_params(
+            params=sensitivity_params,
+            alpha=DEFAULT_SENSITIVITY_ALPHA,
+            null_hypothesis=0.0,
+            interval_type="theta",
+        ),
+        "rv_theta_source": source_label,
     }
 
-    if rv is not None:
-        try:
-            out["rv"] = coerce_float(rv)
-        except Exception as exc:
-            out["rv_error"] = format_exception(exc)
 
-    if interval_obj is not None:
-        try:
-            lb, ub = interval_obj
-            out["interval"] = (coerce_float(lb), coerce_float(ub))
-        except Exception as exc:
-            out["interval_error"] = format_exception(exc)
+def select_authoritative_metric(
+    candidates: Sequence[Dict[str, Any]],
+    value_key: str,
+    source_key: str,
+    error_key: str,
+) -> Dict[str, Any]:
+    first_error = ""
+    for candidate in candidates:
+        if metric_has_value(candidate.get(value_key)) and candidate.get(source_key):
+            return {
+                "value": candidate.get(value_key),
+                "source": candidate.get(source_key),
+                "error": "",
+            }
+        if not first_error and maybe_string(candidate.get(error_key)):
+            first_error = maybe_string(candidate.get(error_key))
+    return {"value": None, "source": "", "error": first_error}
 
-    if sensitivity_params is None:
-        return out
 
-    fallback_interval = sensitivity_interval_from_params(
-        params=sensitivity_params,
-        alpha=DEFAULT_SENSITIVITY_ALPHA,
-        c_y=DEFAULT_SENSITIVITY_C_Y,
-        c_t=DEFAULT_SENSITIVITY_C_T,
-        rho=DEFAULT_SENSITIVITY_RHO,
-        interval_type="ci",
+def extract_sensitivity_outputs(
+    saved_training_direct: Dict[str, Any],
+    loaded_direct: Dict[str, Any],
+    compatibility_direct: Dict[str, Any],
+    saved_training_params_metrics: Dict[str, Any],
+    fallback_manual_metrics: Dict[str, Any],
+) -> Dict[str, Any]:
+    candidates = [
+        saved_training_direct,
+        loaded_direct,
+        compatibility_direct,
+        saved_training_params_metrics,
+        fallback_manual_metrics,
+    ]
+
+    rv = select_authoritative_metric(candidates, "rv", "rv_source", "rv_error")
+    interval = select_authoritative_metric(
+        candidates, "interval", "interval_source", "interval_error"
     )
-    fallback_rv = robustness_value_from_params(
-        params=sensitivity_params,
-        alpha=DEFAULT_SENSITIVITY_ALPHA,
-        null_hypothesis=0.0,
-        interval_type="ci",
+    summary_text = select_authoritative_metric(
+        candidates, "summary_text", "summary_source", "summary_error"
     )
-    fallback_rv_theta = robustness_value_from_params(
-        params=sensitivity_params,
-        alpha=DEFAULT_SENSITIVITY_ALPHA,
-        null_hypothesis=0.0,
-        interval_type="theta",
+    estimator_summary = select_authoritative_metric(
+        [saved_training_direct, loaded_direct, compatibility_direct],
+        "estimator_summary_text",
+        "estimator_summary_source",
+        "estimator_summary_error",
     )
-    fallback_summary = build_sensitivity_summary_text(sensitivity_params)
+    rv_theta = select_authoritative_metric(
+        [saved_training_params_metrics, fallback_manual_metrics],
+        "rv_theta",
+        "rv_theta_source",
+        "rv_error",
+    )
 
-    if out["rv"] is None:
-        out["rv"] = fallback_rv
-        out["rv_error"] = None
-        out["source"] = "residual_space_fallback"
-
-    if out["interval"] is None:
-        out["interval"] = fallback_interval
-        out["interval_error"] = None
-        out["source"] = "residual_space_fallback"
-
-    if not out["summary_text"]:
-        out["summary_text"] = fallback_summary
-        out["summary_error"] = None
-        out["source"] = "residual_space_fallback"
-
-    out["rv_theta"] = fallback_rv_theta
-    return out
+    return {
+        "rv": rv["value"],
+        "rv_source": rv["source"],
+        "rv_error": rv["error"],
+        "rv_theta": rv_theta["value"],
+        "rv_theta_source": rv_theta["source"],
+        "summary_text": summary_text["value"] or "",
+        "summary_source": summary_text["source"],
+        "summary_error": summary_text["error"],
+        "interval": interval["value"],
+        "interval_source": interval["source"],
+        "interval_error": interval["error"],
+        "estimator_summary_text": estimator_summary["value"] or "",
+        "estimator_summary_source": estimator_summary["source"],
+        "estimator_summary_error": estimator_summary["error"],
+    }
 
 
 def single_feature_r_squared(feature: np.ndarray, target: np.ndarray) -> float:
@@ -767,20 +1310,20 @@ def compute_single_confounder_strengths(
     rows: List[Dict[str, Any]] = []
     for idx, confounder in enumerate(confounder_names):
         z = W[:, idx]
-        cf_y = single_feature_r_squared(z, y_res)
-        cf_d = single_feature_r_squared(z, t_res)
+        proxy_cf_y = single_feature_r_squared(z, y_res)
+        proxy_cf_d = single_feature_r_squared(z, t_res)
         rows.append({
             "confounder": confounder,
-            "cf_y": cf_y,
-            "cf_d": cf_d,
-            "strength_score": cf_y * cf_d,
+            "proxy_cf_y": proxy_cf_y,
+            "proxy_cf_d": proxy_cf_d,
+            "proxy_strength_score": proxy_cf_y * proxy_cf_d,
         })
 
     rows.sort(
         key=lambda row: (
-            -row["strength_score"],
-            -row["cf_y"],
-            -row["cf_d"],
+            -row["proxy_strength_score"],
+            -row["proxy_cf_y"],
+            -row["proxy_cf_d"],
             row["confounder"],
         )
     )
@@ -808,8 +1351,8 @@ def select_benchmark_confounders(
     annotated_rows = []
     for row in scores_rows:
         new_row = dict(row)
-        new_row["selected_as_benchmark"] = row["confounder"] in selected_names
-        new_row["is_primary_benchmark"] = row["confounder"] == primary_name
+        new_row["selected_as_candidate"] = row["confounder"] in selected_names
+        new_row["is_primary_candidate"] = row["confounder"] == primary_name
         annotated_rows.append(new_row)
 
     return {
@@ -817,13 +1360,13 @@ def select_benchmark_confounders(
         "selected_rows": selected_rows,
         "primary_row": primary_row,
         "aggregation_rule": (
-            "Primary benchmark is the selected confounder with the largest "
-            "strength_score among the top-k selected confounders."
+            "Primary candidate is the shortlisted confounder with the largest "
+            "proxy_strength_score among the top-k proxy-screened confounders."
         ),
     }
 
 
-def compute_robustness_ratio(
+def compute_proxy_robustness_ratio(
     rv: float | None,
     cf_y: float | None,
     cf_d: float | None,
@@ -839,6 +1382,42 @@ def compute_robustness_ratio(
     return float(rv / denom)
 
 
+def compute_real_benchmark_values(
+    est: Any,
+    artifact_direct: Dict[str, Any],
+    shortlisted_rows: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    _ = est
+    _ = artifact_direct
+
+    if not shortlisted_rows:
+        return {
+            "available": False,
+            "source": "unavailable_no_proxy_candidates",
+            "selected_confounder": "",
+            "cf_y": None,
+            "cf_d": None,
+            "strength_score": None,
+            "warnings": ["No shortlisted confounders were available for Stage 2 real benchmark evaluation."],
+        }
+
+    return {
+        "available": False,
+        "source": "unimplemented_by_design",
+        "selected_confounder": "",
+        "cf_y": None,
+        "cf_d": None,
+        "strength_score": None,
+        "warnings": [
+            (
+                "Stage 2 real benchmark extraction is currently unimplemented by design in this "
+                f"analysis pipeline for econml in {PREFERRED_ENV_NAME}; this is not a loaded-artifact "
+                "extraction failure."
+            )
+        ],
+    }
+
+
 def sensitivity_margin(lb: float | None, ub: float | None) -> float:
     if lb is None or ub is None:
         return float("nan")
@@ -849,20 +1428,24 @@ def sensitivity_margin(lb: float | None, ub: float | None) -> float:
     return float(-min(ub, -lb))
 
 
-def save_sensitivity_contour(
+def save_custom_sensitivity_contour(
     sensitivity_params: SensitivityParams | None,
     treatment_dir: Path,
     treatment: str,
     benchmark_rows: Sequence[Dict[str, Any]],
-) -> Tuple[str | None, List[str]]:
+    source_label: str,
+) -> Tuple[str | None, str, List[str]]:
+    # In the pinned econml310 env with econml 0.16.0, fitted LinearDML and
+    # CausalForestDML expose sensitivity statistics but not sensitivity_plot(),
+    # so contour generation here is intentionally custom and parameter-based.
     notes: List[str] = []
 
     if not SAVE_CONTOUR_PLOT:
         notes.append("Contour plotting disabled by SAVE_CONTOUR_PLOT=False.")
-        return None, notes
+        return None, "custom_not_available", notes
     if sensitivity_params is None:
-        notes.append("Contour plot unavailable because sensitivity parameters were unavailable.")
-        return None, notes
+        notes.append("Custom contour unavailable because sensitivity parameters were unavailable.")
+        return None, "custom_not_available", notes
 
     grid = np.linspace(0.0, 1.0, SENSITIVITY_GRID_STEPS)
     margins = np.full((len(grid), len(grid)), np.nan, dtype=float)
@@ -883,8 +1466,8 @@ def save_sensitivity_contour(
                 continue
 
     if np.isnan(margins).all():
-        notes.append("Contour plot unavailable because the sensitivity grid could not be evaluated.")
-        return None, notes
+        notes.append("Custom contour unavailable because the sensitivity grid could not be evaluated.")
+        return None, "custom_not_available", notes
 
     finite = margins[np.isfinite(margins)]
     vmin = float(finite.min())
@@ -916,8 +1499,8 @@ def save_sensitivity_contour(
         size = 140 if idx == 1 else 70
         color = "gold" if idx == 1 else "black"
         ax.scatter(
-            row["cf_d"],
-            row["cf_y"],
+            row["proxy_cf_d"],
+            row["proxy_cf_y"],
             marker=marker,
             s=size,
             color=color,
@@ -927,7 +1510,7 @@ def save_sensitivity_contour(
         )
         ax.annotate(
             f"{idx}. {row['confounder']}",
-            (row["cf_d"], row["cf_y"]),
+            (row["proxy_cf_d"], row["proxy_cf_y"]),
             xytext=(5, 5),
             textcoords="offset points",
             fontsize=8,
@@ -950,9 +1533,10 @@ def save_sensitivity_contour(
     plt.close(fig)
 
     notes.append(
-        "Contour plot used a fallback matplotlib grid from residual-space sensitivity parameters."
+        "Contour plot used a custom reconstructed matplotlib grid from sensitivity parameters "
+        f"with source '{source_label}'."
     )
-    return str(output_path), notes
+    return str(output_path), source_label, notes
 
 
 def write_benchmark_report(path: Path, report_data: Dict[str, Any]) -> None:
@@ -961,11 +1545,15 @@ def write_benchmark_report(path: Path, report_data: Dict[str, Any]) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write("=== Benchmark-Based CATE Sensitivity Report ===\n\n")
         f.write(f"Run status: {report_data.get('run_status', 'UNKNOWN')}\n")
+        f.write(f"Preferred runtime env: {PREFERRED_ENV_NAME}\n")
+        f.write(f"Python executable: {sys.executable}\n")
         f.write(f"Treatment: {report_data.get('treatment', '')}\n")
         f.write(f"Model type: {report_data.get('model_type', '')}\n")
-        f.write(f"Estimator class (loaded artifact): {report_data.get('loaded_estimator_class', '')}\n")
-        f.write(f"Benchmark estimator source: {report_data.get('benchmark_estimator_source', '')}\n")
-        f.write(f"Sensitivity source: {report_data.get('sensitivity_source', '')}\n")
+        f.write(f"Estimator class: {report_data.get('estimator_class', '')}\n")
+        f.write(
+            "Model loaded successfully in econml310: "
+            f"{report_data.get('model_loaded_in_econml310', False)}\n"
+        )
         f.write(f"Model artifact: {report_data.get('model_artifact_path', '')}\n")
         f.write(f"Analysis dataframe source: {report_data.get('analysis_dataframe_paths', '')}\n\n")
 
@@ -978,10 +1566,77 @@ def write_benchmark_report(path: Path, report_data: Dict[str, Any]) -> None:
             f.write(report_data["traceback"] + "\n")
 
         f.write("Artifact metadata:\n")
+        f.write(f"Artifact schema version: {report_data.get('artifact_schema_version', '')}\n")
+        f.write(f"Training timestamp: {report_data.get('training_timestamp', '')}\n")
+        f.write(f"Training python version: {report_data.get('training_python_version', '')}\n")
+        f.write(f"Training platform: {report_data.get('training_platform', '')}\n")
+        f.write(f"Training econml version: {report_data.get('training_econml_version', '')}\n")
+        f.write(f"Training sklearn version: {report_data.get('training_sklearn_version', '')}\n")
+        f.write(f"Training numpy version: {report_data.get('training_numpy_version', '')}\n")
+        f.write(f"Training pandas version: {report_data.get('training_pandas_version', '')}\n")
+        f.write(f"Training scipy version: {report_data.get('training_scipy_version', '')}\n")
         f.write(f"Outcome column: {report_data.get('outcome_col', '')}\n")
+        f.write(f"cache_values_used during training: {report_data.get('cache_values_used', False)}\n")
         f.write(f"Confounders: {report_data.get('confounders', [])}\n")
         f.write(f"Effect modifiers: {report_data.get('effect_modifiers', [])}\n")
         f.write(f"Formula:\n{report_data.get('formula', '')}\n\n")
+
+        f.write("Saved training-time direct diagnostics:\n")
+        f.write(f"saved_direct_rv: {report_data.get('saved_direct_rv', '')}\n")
+        f.write(
+            f"saved_direct_rv_source: {report_data.get('saved_direct_rv_source', '')}\n"
+        )
+        f.write(
+            f"saved_direct_rv_error: {report_data.get('saved_direct_rv_error', '')}\n"
+        )
+        f.write(
+            "saved_direct_sensitivity_interval: "
+            f"{report_data.get('saved_direct_sensitivity_interval', '')}\n"
+        )
+        f.write(
+            "saved_direct_sensitivity_interval_source: "
+            f"{report_data.get('saved_direct_sensitivity_interval_source', '')}\n"
+        )
+        f.write(
+            "saved_direct_sensitivity_interval_error: "
+            f"{report_data.get('saved_direct_sensitivity_interval_error', '')}\n"
+        )
+        f.write(
+            "saved_direct_sensitivity_summary_source: "
+            f"{report_data.get('saved_direct_sensitivity_summary_source', '')}\n"
+        )
+        f.write(
+            "saved_direct_sensitivity_summary_error: "
+            f"{report_data.get('saved_direct_sensitivity_summary_error', '')}\n"
+        )
+        f.write(
+            "saved_direct_estimator_summary_source: "
+            f"{report_data.get('saved_direct_estimator_summary_source', '')}\n"
+        )
+        f.write(
+            "saved_sensitivity_params_available: "
+            f"{report_data.get('saved_sensitivity_params_available', False)}\n"
+        )
+        f.write(
+            "saved_sensitivity_params_source: "
+            f"{report_data.get('saved_sensitivity_params_source', '')}\n"
+        )
+        f.write(
+            "saved_sensitivity_params_error: "
+            f"{report_data.get('saved_sensitivity_params_error', '')}\n\n"
+        )
+        f.write(
+            "saved_training_residuals_available: "
+            f"{report_data.get('saved_training_residuals_available', False)}\n"
+        )
+        f.write(
+            "saved_training_residuals_source: "
+            f"{report_data.get('saved_training_residuals_source', '')}\n"
+        )
+        f.write(
+            "saved_training_residuals_error: "
+            f"{report_data.get('saved_training_residuals_error', '')}\n\n"
+        )
 
         analysis_summary = report_data.get("analysis_summary", {})
         if analysis_summary:
@@ -995,19 +1650,53 @@ def write_benchmark_report(path: Path, report_data: Dict[str, Any]) -> None:
             )
             f.write(f"Fill map: {analysis_summary.get('fill_map', {})}\n\n")
 
-        f.write("Sensitivity outputs:\n")
-        f.write(f"RV: {report_data.get('rv', '')}\n")
-        f.write(f"RV (theta): {report_data.get('rv_theta', '')}\n")
-        f.write(f"Default sensitivity interval: {report_data.get('sensitivity_interval', '')}\n")
+        f.write("Direct model extraction:\n")
         f.write(
-            "Robustness ratio (RV / max(primary cf_y, primary cf_d)): "
-            f"{report_data.get('robustness_ratio', '')}\n"
+            f"Direct residuals available on loaded estimator: "
+            f"{report_data.get('direct_residuals_available', False)}\n"
         )
-        f.write(f"Contour plot path: {report_data.get('contour_plot_path', '')}\n\n")
+        f.write(f"Residual source used by analysis: {report_data.get('residual_source', '')}\n")
+        f.write(
+            "Direct RV from saved/loaded/compatibility path if available: "
+            f"{report_data.get('direct_rv', '')}\n"
+        )
+        f.write(
+            "Direct sensitivity interval from saved/loaded/compatibility path if available: "
+            f"{report_data.get('direct_sensitivity_interval', '')}\n"
+        )
+        direct_summary_text = maybe_string(report_data.get("direct_sensitivity_summary_text"))
+        f.write(
+            "Direct sensitivity summary from saved/loaded/compatibility path available: "
+            f"{bool(direct_summary_text)}\n"
+        )
+        f.write(f"Authoritative RV: {report_data.get('rv', '')}\n")
+        f.write(f"RV source: {report_data.get('rv_source', '')}\n")
+        f.write(f"Fallback theta RV: {report_data.get('rv_theta', '')}\n")
+        f.write(f"Fallback theta RV source: {report_data.get('rv_theta_source', '')}\n")
+        f.write(
+            "Authoritative sensitivity interval: "
+            f"{report_data.get('sensitivity_interval', '')}\n"
+        )
+        f.write(
+            "Sensitivity interval source: "
+            f"{report_data.get('sensitivity_interval_source', '')}\n"
+        )
+        f.write(
+            "Authoritative sensitivity summary source: "
+            f"{report_data.get('sensitivity_summary_source', '')}\n"
+        )
+        f.write(
+            "Direct estimator summary source: "
+            f"{report_data.get('estimator_summary_source', '')}\n\n"
+        )
 
         if report_data.get("sensitivity_summary_text"):
-            f.write("Sensitivity summary:\n")
+            f.write("Sensitivity summary used in report:\n")
             f.write(report_data["sensitivity_summary_text"] + "\n\n")
+
+        if report_data.get("estimator_summary_text"):
+            f.write("Direct estimator summary:\n")
+            f.write(report_data["estimator_summary_text"] + "\n\n")
 
         f.write("Residual handling note:\n")
         f.write(
@@ -1021,37 +1710,75 @@ def write_benchmark_report(path: Path, report_data: Dict[str, Any]) -> None:
 
         scores_rows = list(report_data.get("scores_rows", []))
         if scores_rows:
-            f.write("Per-confounder benchmark scores:\n")
-            f.write("rank | confounder | cf_y | cf_d | strength_score\n")
+            f.write("Stage 1 proxy confounder screening:\n")
+            f.write("rank | confounder | proxy_cf_y | proxy_cf_d | proxy_strength_score\n")
             for row in scores_rows:
                 f.write(
                     f"{row['rank']} | {row['confounder']} | "
-                    f"{row['cf_y']:.6f} | {row['cf_d']:.6f} | "
-                    f"{row['strength_score']:.6f}\n"
+                    f"{row['proxy_cf_y']:.6f} | {row['proxy_cf_d']:.6f} | "
+                    f"{row['proxy_strength_score']:.6f}\n"
                 )
             f.write("\n")
         else:
-            f.write("Per-confounder benchmark scores:\nNone\n\n")
+            f.write("Stage 1 proxy confounder screening:\nNone\n\n")
 
         selected_rows = list(report_data.get("selected_rows", []))
         if selected_rows:
-            f.write("Selected benchmark confounders:\n")
+            f.write("Selected candidate confounders for Stage 2 real benchmark:\n")
             for row in selected_rows:
                 f.write(
                     f"- {row['confounder']} "
-                    f"(cf_y={row['cf_y']:.6f}, cf_d={row['cf_d']:.6f}, "
-                    f"strength_score={row['strength_score']:.6f})\n"
+                    f"(proxy_cf_y={row['proxy_cf_y']:.6f}, "
+                    f"proxy_cf_d={row['proxy_cf_d']:.6f}, "
+                    f"proxy_strength_score={row['proxy_strength_score']:.6f})\n"
                 )
             f.write(
-                "\nAggregation rule for benchmark ratio:\n"
+                "\nAggregation rule for proxy screening:\n"
                 f"{report_data.get('aggregation_rule', '')}\n\n"
             )
         else:
-            f.write("Selected benchmark confounders:\nNone\n\n")
+            f.write("Selected candidate confounders for Stage 2 real benchmark:\nNone\n\n")
+
+        real_benchmark = dict(report_data.get("real_benchmark", {}))
+        f.write("Stage 2 real benchmark results:\n")
+        f.write(f"Available: {real_benchmark.get('available', False)}\n")
+        f.write(f"Source: {real_benchmark.get('source', '')}\n")
+        f.write(f"Selected benchmark confounder: {real_benchmark.get('selected_confounder', '')}\n")
+        f.write(f"benchmark_cf_y: {real_benchmark.get('cf_y', '')}\n")
+        f.write(f"benchmark_cf_d: {real_benchmark.get('cf_d', '')}\n")
+        f.write(f"benchmark_strength_score: {real_benchmark.get('strength_score', '')}\n\n")
+
+        f.write("Ratios:\n")
+        f.write(
+            "Proxy robustness ratio (RV / max(proxy_cf_y, proxy_cf_d)): "
+            f"{report_data.get('proxy_robustness_ratio', '')}\n"
+        )
+        f.write(
+            "Real benchmark robustness ratio: "
+            f"{report_data.get('robustness_ratio', '')}\n\n"
+        )
+
+        f.write("Contour output:\n")
+        f.write(f"Contour source: {report_data.get('contour_source', '')}\n")
+        f.write(f"Contour plot path: {report_data.get('contour_plot_path', '')}\n\n")
+
+        direct_artifact = dict(report_data.get("direct_artifact_diagnostics", {}))
+        if direct_artifact:
+            f.write("Saved direct artifact diagnostics:\n")
+            for key in sorted(direct_artifact):
+                f.write(f"- {key}: {direct_artifact[key]}\n")
+            f.write("\n")
+
+        fallbacks_used = list(report_data.get("fallbacks_used", []))
+        if fallbacks_used:
+            f.write("Fallbacks used:\n")
+            for item in fallbacks_used:
+                f.write(f"- {item}\n")
+            f.write("\n")
 
         warnings_list = list(report_data.get("warnings", []))
         if warnings_list:
-            f.write("Warnings / fallbacks / unavailable APIs:\n")
+            f.write("Warnings / unavailable APIs:\n")
             for item in warnings_list:
                 f.write(f"- {item}\n")
             f.write("\n")
@@ -1065,14 +1792,41 @@ def write_benchmark_report(path: Path, report_data: Dict[str, Any]) -> None:
 
 def empty_summary_row(treatment: str, report_path: Path, scores_path: Path) -> Dict[str, Any]:
     return {
+        "row_id": build_summary_row_id("", treatment),
         "treatment": treatment,
         "model_type": "",
+        "estimator_class": "",
+        "model_loaded_in_econml310": False,
+        "cache_values_used": False,
+        "saved_training_residuals_available": False,
+        "saved_training_residuals_source": "",
         "RV": None,
+        "rv_source": "",
+        "sensitivity_interval_source": "",
+        "sensitivity_summary_source": "",
+        "estimator_summary_source": "",
+        "direct_rv": None,
+        "sensitivity_interval": None,
+        "sensitivity_interval_lb": None,
+        "sensitivity_interval_ub": None,
+        "direct_sensitivity_interval": None,
+        "direct_sensitivity_interval_lb": None,
+        "direct_sensitivity_interval_ub": None,
+        "direct_sensitivity_summary_available": False,
+        "residual_source": "",
+        "proxy_primary_candidate": "",
+        "proxy_cf_y": None,
+        "proxy_cf_d": None,
+        "proxy_strength_score": None,
+        "proxy_robustness_ratio": None,
         "selected_benchmark_confounder": "",
-        "benchmark_cf_y": None,
-        "benchmark_cf_d": None,
-        "benchmark_strength_score": None,
+        "real_benchmark_available": False,
+        "real_benchmark_cf_y": None,
+        "real_benchmark_cf_d": None,
+        "real_benchmark_strength_score": None,
+        "real_benchmark_source": "",
         "robustness_ratio": None,
+        "contour_source": "",
         "contour_plot_path": "",
         "run_status": "FAILED",
         "report_path": str(report_path),
@@ -1097,31 +1851,72 @@ def analyze_one_treatment(
 
     summary_row = empty_summary_row(treatment_hint, report_path, scores_path)
     warnings_list: List[str] = []
+    fallbacks_used: List[str] = []
     report_data: Dict[str, Any] = {
         "run_status": "FAILED",
         "treatment": treatment_hint,
         "model_type": "",
-        "loaded_estimator_class": "",
-        "benchmark_estimator_source": "",
-        "sensitivity_source": "",
+        "estimator_class": "",
+        "model_loaded_in_econml310": False,
+        "cache_values_used": False,
         "model_artifact_path": str(model_path),
         "analysis_dataframe_paths": f"latent_tags={latent_tags_path}; physionet={physionet_pkl_path}",
+        "artifact_schema_version": "",
+        "training_timestamp": "",
+        "training_python_version": "",
+        "training_platform": "",
+        "training_econml_version": "",
+        "training_sklearn_version": "",
+        "training_numpy_version": "",
+        "training_pandas_version": "",
+        "training_scipy_version": "",
         "outcome_col": "",
         "confounders": [],
         "effect_modifiers": [],
         "formula": "",
         "analysis_summary": {},
+        "saved_direct_rv": None,
+        "saved_direct_rv_source": "",
+        "saved_direct_rv_error": "",
+        "saved_direct_sensitivity_interval": None,
+        "saved_direct_sensitivity_interval_source": "",
+        "saved_direct_sensitivity_interval_error": "",
+        "saved_direct_sensitivity_summary_source": "",
+        "saved_direct_sensitivity_summary_error": "",
+        "saved_direct_estimator_summary_source": "",
+        "saved_sensitivity_params_available": False,
+        "saved_sensitivity_params_source": "",
+        "saved_sensitivity_params_error": "",
+        "saved_training_residuals_available": False,
+        "saved_training_residuals_source": "",
+        "saved_training_residuals_error": "",
         "rv": None,
+        "rv_source": "",
         "rv_theta": None,
+        "rv_theta_source": "",
+        "direct_rv": None,
+        "direct_sensitivity_interval": None,
+        "direct_sensitivity_summary_text": "",
         "sensitivity_interval": None,
+        "sensitivity_interval_source": "",
         "sensitivity_summary_text": "",
+        "sensitivity_summary_source": "",
+        "estimator_summary_text": "",
+        "estimator_summary_source": "",
+        "direct_residuals_available": False,
+        "residual_source": "",
+        "proxy_robustness_ratio": None,
         "robustness_ratio": None,
+        "real_benchmark": {},
+        "contour_source": "",
         "contour_plot_path": "",
         "scores_rows": [],
         "selected_rows": [],
         "aggregation_rule": "",
+        "fallbacks_used": fallbacks_used,
         "warnings": warnings_list,
         "training_summary": {},
+        "direct_artifact_diagnostics": {},
         "residual_rows": None,
         "error": "",
         "traceback": "",
@@ -1146,12 +1941,63 @@ def analyze_one_treatment(
         report_data.update({
             "treatment": treatment,
             "model_type": artifact["model_type"],
-            "loaded_estimator_class": type(artifact["estimator"]).__name__,
+            "estimator_class": artifact["estimator_class"],
+            "model_loaded_in_econml310": PREFERRED_ENV_NAME in sys.executable,
+            "cache_values_used": artifact["cache_values_used"],
+            "artifact_schema_version": artifact["artifact_schema_version"],
+            "training_timestamp": artifact["training_timestamp"],
+            "training_python_version": artifact["python_version"],
+            "training_platform": artifact["platform"],
+            "training_econml_version": artifact["econml_version"],
+            "training_sklearn_version": artifact["sklearn_version"],
+            "training_numpy_version": artifact["numpy_version"],
+            "training_pandas_version": artifact["pandas_version"],
+            "training_scipy_version": artifact["scipy_version"],
             "outcome_col": artifact["outcome_col"],
             "confounders": artifact["confounders"],
             "effect_modifiers": artifact["effect_modifiers"],
             "formula": artifact["formula"],
+            "saved_direct_rv": artifact["saved_direct_rv"],
+            "saved_direct_rv_source": artifact["saved_direct_rv_source"],
+            "saved_direct_rv_error": artifact["saved_direct_rv_error"],
+            "saved_direct_sensitivity_interval": artifact[
+                "saved_direct_sensitivity_interval"
+            ],
+            "saved_direct_sensitivity_interval_source": artifact[
+                "saved_direct_sensitivity_interval_source"
+            ],
+            "saved_direct_sensitivity_interval_error": artifact[
+                "saved_direct_sensitivity_interval_error"
+            ],
+            "saved_direct_sensitivity_summary_source": artifact[
+                "saved_direct_sensitivity_summary_source"
+            ],
+            "saved_direct_sensitivity_summary_error": artifact[
+                "saved_direct_sensitivity_summary_error"
+            ],
+            "saved_direct_estimator_summary_source": artifact[
+                "saved_direct_estimator_summary_source"
+            ],
+            "saved_sensitivity_params_available": artifact[
+                "saved_sensitivity_params_available"
+            ],
+            "saved_sensitivity_params_source": artifact[
+                "saved_sensitivity_params_source"
+            ],
+            "saved_sensitivity_params_error": artifact[
+                "saved_sensitivity_params_error"
+            ],
+            "saved_training_residuals_available": artifact[
+                "saved_training_residuals_available"
+            ],
+            "saved_training_residuals_source": artifact[
+                "saved_training_residuals_source"
+            ],
+            "saved_training_residuals_error": artifact[
+                "saved_training_residuals_error"
+            ],
             "training_summary": artifact["summary"],
+            "direct_artifact_diagnostics": artifact["direct_diagnostics"],
         })
 
         prepared = None
@@ -1165,32 +2011,103 @@ def analyze_one_treatment(
             report_data["analysis_summary"] = prepared
             summary_row["analysis_rows"] = prepared["analysis_rows"]
 
-        benchmark_estimator = artifact["estimator"]
-        benchmark_estimator_source = "loaded_artifact"
+        loaded_estimator = artifact["estimator"]
+        saved_training_direct = extract_saved_training_direct_metrics(artifact)
+        loaded_direct = extract_estimator_direct_metrics(
+            est=loaded_estimator,
+            effect_modifiers=artifact.get(
+                "effect_modifiers_order", artifact["effect_modifiers"]
+            ),
+            source_label="loaded_estimator_direct",
+        )
 
+        residual_source = ""
         residual_info = None
         try:
-            residual_info = extract_dml_residuals(benchmark_estimator)
+            residual_info = extract_dml_residuals(loaded_estimator)
+            residual_source = "loaded_estimator_direct"
+            report_data["direct_residuals_available"] = True
         except Exception as exc:
             warnings_list.append(
                 f"Loaded estimator residuals_ unavailable: {format_exception(exc)}"
             )
+            report_data["direct_residuals_available"] = False
 
-        if residual_info is None and prepared is not None:
-            warnings_list.append(
-                "Re-fitting a compatibility estimator with cache_values=True to recover residual-space diagnostics."
+        need_compatibility_refit = prepared is not None and (
+            residual_info is None
+            or (
+                not metric_selected_from_source(
+                    saved_training_direct,
+                    "rv",
+                    "rv_source",
+                    ["saved_training_direct"],
+                )
+                and not metric_selected_from_source(
+                    loaded_direct,
+                    "rv",
+                    "rv_source",
+                    ["loaded_estimator_direct"],
+                )
             )
-            benchmark_estimator = fit_compatibility_estimator(
+            or (
+                not metric_selected_from_source(
+                    saved_training_direct,
+                    "interval",
+                    "interval_source",
+                    ["saved_training_direct"],
+                )
+                and not metric_selected_from_source(
+                    loaded_direct,
+                    "interval",
+                    "interval_source",
+                    ["loaded_estimator_direct"],
+                )
+            )
+            or (
+                not metric_selected_from_source(
+                    saved_training_direct,
+                    "summary_text",
+                    "summary_source",
+                    ["saved_training_direct"],
+                )
+                and not metric_selected_from_source(
+                    loaded_direct,
+                    "summary_text",
+                    "summary_source",
+                    ["loaded_estimator_direct"],
+                )
+            )
+        )
+
+        compatibility_estimator = None
+        compatibility_direct = empty_sensitivity_metrics()
+        if need_compatibility_refit:
+            compatibility_note = (
+                "Used compatibility refit with cache_values=True to test direct sensitivity APIs in "
+                f"{PREFERRED_ENV_NAME} and recover residual-space diagnostics when needed."
+            )
+            warnings_list.append(compatibility_note)
+            compatibility_estimator = fit_compatibility_estimator(
                 model_type=artifact["model_type"],
                 Y=prepared["Y"],
                 T=prepared["T"],
                 W=prepared["W"],
                 X=prepared["X"],
             )
-            benchmark_estimator_source = "compatibility_refit"
-            residual_info = extract_dml_residuals(benchmark_estimator)
+            compatibility_direct = extract_estimator_direct_metrics(
+                est=compatibility_estimator,
+                effect_modifiers=artifact.get(
+                    "effect_modifiers_order", artifact["effect_modifiers"]
+                ),
+                source_label="compatibility_refit_direct",
+            )
+            if residual_info is None:
+                residual_info = extract_dml_residuals(compatibility_estimator)
+                residual_source = "compatibility_refit_direct"
+                report_data["direct_residuals_available"] = True
 
-        report_data["benchmark_estimator_source"] = benchmark_estimator_source
+        report_data["residual_source"] = residual_source
+        summary_row["residual_source"] = residual_source
 
         sensitivity_params = None
         if residual_info is not None:
@@ -1205,7 +2122,7 @@ def analyze_one_treatment(
                 y_res=residual_info["y_res"],
                 t_res=residual_info["t_res"],
                 W=residual_info["W_res"],
-                confounder_names=artifact["confounders"],
+                confounder_names=artifact.get("confounders_order", artifact["confounders"]),
             )
 
             benchmark_selection = select_benchmark_confounders(
@@ -1223,69 +2140,224 @@ def analyze_one_treatment(
             selected_rows = []
             primary_row = None
 
-        sensitivity_outputs = extract_sensitivity_outputs(
-            est=artifact["estimator"],
-            sensitivity_params=sensitivity_params,
+        saved_training_params, saved_training_params_error = (
+            reconstruct_saved_training_sensitivity_params(artifact)
         )
-        report_data["sensitivity_source"] = sensitivity_outputs["source"]
-        report_data["rv"] = sensitivity_outputs["rv"]
-        report_data["rv_theta"] = sensitivity_outputs["rv_theta"]
-        report_data["sensitivity_interval"] = sensitivity_outputs["interval"]
-        report_data["sensitivity_summary_text"] = sensitivity_outputs["summary_text"]
+        if saved_training_params_error and artifact["saved_sensitivity_params_available"]:
+            warnings_list.append(
+                "Saved training sensitivity params could not be reconstructed: "
+                f"{saved_training_params_error}"
+            )
 
-        if sensitivity_outputs["rv_error"]:
+        saved_training_params_metrics = build_params_based_metrics(
+            saved_training_params,
+            "saved_training_params_reconstructed",
+        )
+        fallback_manual_metrics = build_params_based_metrics(
+            sensitivity_params,
+            "fallback_manual",
+        )
+
+        sensitivity_outputs = extract_sensitivity_outputs(
+            saved_training_direct=saved_training_direct,
+            loaded_direct=loaded_direct,
+            compatibility_direct=compatibility_direct,
+            saved_training_params_metrics=saved_training_params_metrics,
+            fallback_manual_metrics=fallback_manual_metrics,
+        )
+        report_data["rv"] = sensitivity_outputs["rv"]
+        report_data["rv_source"] = sensitivity_outputs["rv_source"]
+        report_data["rv_theta"] = sensitivity_outputs["rv_theta"]
+        report_data["rv_theta_source"] = sensitivity_outputs["rv_theta_source"]
+        report_data["direct_rv"] = (
+            sensitivity_outputs["rv"]
+            if sensitivity_outputs["rv_source"] in {
+                "saved_training_direct",
+                "loaded_estimator_direct",
+                "compatibility_refit_direct",
+            }
+            else None
+        )
+        report_data["direct_sensitivity_interval"] = (
+            sensitivity_outputs["interval"]
+            if sensitivity_outputs["interval_source"] in {
+                "saved_training_direct",
+                "loaded_estimator_direct",
+                "compatibility_refit_direct",
+            }
+            else None
+        )
+        report_data["direct_sensitivity_summary_text"] = (
+            sensitivity_outputs["summary_text"]
+            if sensitivity_outputs["summary_source"] in {
+                "saved_training_direct",
+                "loaded_estimator_direct",
+                "compatibility_refit_direct",
+            }
+            else ""
+        )
+        report_data["sensitivity_interval"] = sensitivity_outputs["interval"]
+        report_data["sensitivity_interval_source"] = sensitivity_outputs["interval_source"]
+        report_data["sensitivity_summary_text"] = sensitivity_outputs["summary_text"]
+        report_data["sensitivity_summary_source"] = sensitivity_outputs["summary_source"]
+        report_data["estimator_summary_text"] = sensitivity_outputs["estimator_summary_text"]
+        report_data["estimator_summary_source"] = sensitivity_outputs["estimator_summary_source"]
+
+        if loaded_direct["rv_error"]:
             warnings_list.append(
-                f"robustness_value() unavailable on loaded estimator: {sensitivity_outputs['rv_error']}"
+                f"robustness_value() unavailable on loaded estimator: {loaded_direct['rv_error']}"
             )
-        if sensitivity_outputs["summary_error"]:
+        if loaded_direct["summary_error"]:
             warnings_list.append(
-                f"sensitivity_summary() unavailable on loaded estimator: {sensitivity_outputs['summary_error']}"
+                f"sensitivity_summary() unavailable on loaded estimator: {loaded_direct['summary_error']}"
             )
-        if sensitivity_outputs["interval_error"]:
+        if loaded_direct["interval_error"]:
             warnings_list.append(
                 "sensitivity_interval() unavailable on loaded estimator: "
-                f"{sensitivity_outputs['interval_error']}"
+                f"{loaded_direct['interval_error']}"
+            )
+        if compatibility_estimator is not None and compatibility_direct["rv_error"]:
+            warnings_list.append(
+                "robustness_value() unavailable on compatibility refit estimator: "
+                f"{compatibility_direct['rv_error']}"
+            )
+        if compatibility_estimator is not None and compatibility_direct["summary_error"]:
+            warnings_list.append(
+                "sensitivity_summary() unavailable on compatibility refit estimator: "
+                f"{compatibility_direct['summary_error']}"
+            )
+        if compatibility_estimator is not None and compatibility_direct["interval_error"]:
+            warnings_list.append(
+                "sensitivity_interval() unavailable on compatibility refit estimator: "
+                f"{compatibility_direct['interval_error']}"
+            )
+        if sensitivity_outputs["rv_source"] == "saved_training_params_reconstructed":
+            fallbacks_used.append(
+                "Used saved_training_params_reconstructed RV from serialized training-time sensitivity params."
+            )
+        elif sensitivity_outputs["rv_source"] == "fallback_manual":
+            fallbacks_used.append(
+                "Used fallback_manual RV from residual-space sensitivity parameters."
+            )
+        if sensitivity_outputs["summary_source"] == "saved_training_params_reconstructed":
+            fallbacks_used.append(
+                "Used saved_training_params_reconstructed sensitivity summary from serialized training-time sensitivity params."
+            )
+        elif sensitivity_outputs["summary_source"] == "fallback_manual":
+            fallbacks_used.append(
+                "Used fallback_manual sensitivity summary from residual-space sensitivity parameters."
+            )
+        if sensitivity_outputs["interval_source"] == "saved_training_params_reconstructed":
+            fallbacks_used.append(
+                "Used saved_training_params_reconstructed sensitivity interval from serialized training-time sensitivity params."
+            )
+        elif sensitivity_outputs["interval_source"] == "fallback_manual":
+            fallbacks_used.append(
+                "Used fallback_manual sensitivity interval from residual-space sensitivity parameters."
             )
 
-        contour_plot_path, contour_notes = save_sensitivity_contour(
-            sensitivity_params=sensitivity_params,
+        real_benchmark = compute_real_benchmark_values(
+            est=loaded_estimator,
+            artifact_direct=artifact["direct_diagnostics"],
+            shortlisted_rows=selected_rows,
+        )
+        warnings_list.extend(real_benchmark["warnings"])
+        report_data["real_benchmark"] = real_benchmark
+
+        contour_params = None
+        contour_params_source = "custom_not_available"
+        if saved_training_params is not None:
+            contour_params = saved_training_params
+            contour_params_source = "custom_reconstructed_from_saved_params"
+        elif sensitivity_params is not None:
+            contour_params = sensitivity_params
+            contour_params_source = "custom_reconstructed_from_residual_params"
+        contour_plot_path, contour_source, contour_notes = save_custom_sensitivity_contour(
+            sensitivity_params=contour_params,
             treatment_dir=treatment_dir,
             treatment=treatment,
             benchmark_rows=selected_rows,
+            source_label=contour_params_source,
         )
         warnings_list.extend(contour_notes)
+        report_data["contour_source"] = contour_source
         report_data["contour_plot_path"] = contour_plot_path or ""
+        summary_row["contour_source"] = contour_source
         summary_row["contour_plot_path"] = contour_plot_path or ""
 
-        benchmark_cf_y = primary_row["cf_y"] if primary_row else None
-        benchmark_cf_d = primary_row["cf_d"] if primary_row else None
-        benchmark_strength = primary_row["strength_score"] if primary_row else None
+        proxy_cf_y = primary_row["proxy_cf_y"] if primary_row else None
+        proxy_cf_d = primary_row["proxy_cf_d"] if primary_row else None
+        proxy_strength = primary_row["proxy_strength_score"] if primary_row else None
 
-        robustness_ratio = compute_robustness_ratio(
+        proxy_robustness_ratio = compute_proxy_robustness_ratio(
             rv=sensitivity_outputs["rv"],
-            cf_y=benchmark_cf_y,
-            cf_d=benchmark_cf_d,
+            cf_y=proxy_cf_y,
+            cf_d=proxy_cf_d,
         )
+        report_data["proxy_robustness_ratio"] = proxy_robustness_ratio
+
+        robustness_ratio = None
+        if real_benchmark["available"]:
+            robustness_ratio = compute_proxy_robustness_ratio(
+                rv=sensitivity_outputs["rv"],
+                cf_y=real_benchmark["cf_y"],
+                cf_d=real_benchmark["cf_d"],
+            )
         report_data["robustness_ratio"] = robustness_ratio
 
         run_status = "SUCCESS"
-        if primary_row is None or sensitivity_outputs["rv"] is None:
+        if not real_benchmark["available"] or primary_row is None or sensitivity_outputs["rv"] is None:
             run_status = "PARTIAL"
         if residual_info is None and sensitivity_outputs["rv"] is None:
             run_status = "FAILED"
 
         report_data["run_status"] = run_status
+        sensitivity_interval_lb, sensitivity_interval_ub = interval_bounds_or_none(
+            report_data["sensitivity_interval"]
+        )
+        direct_interval_lb, direct_interval_ub = interval_bounds_or_none(
+            report_data["direct_sensitivity_interval"]
+        )
         summary_row.update({
+            "row_id": build_summary_row_id(artifact["model_type"], treatment),
             "treatment": treatment,
             "model_type": artifact["model_type"],
+            "estimator_class": artifact["estimator_class"],
+            "model_loaded_in_econml310": PREFERRED_ENV_NAME in sys.executable,
+            "cache_values_used": artifact["cache_values_used"],
+            "saved_training_residuals_available": artifact[
+                "saved_training_residuals_available"
+            ],
+            "saved_training_residuals_source": artifact[
+                "saved_training_residuals_source"
+            ],
             "RV": sensitivity_outputs["rv"],
-            "selected_benchmark_confounder": primary_row["confounder"] if primary_row else "",
-            "benchmark_cf_y": benchmark_cf_y,
-            "benchmark_cf_d": benchmark_cf_d,
-            "benchmark_strength_score": benchmark_strength,
+            "rv_source": sensitivity_outputs["rv_source"],
+            "sensitivity_interval": report_data["sensitivity_interval"],
+            "sensitivity_interval_lb": sensitivity_interval_lb,
+            "sensitivity_interval_ub": sensitivity_interval_ub,
+            "sensitivity_interval_source": sensitivity_outputs["interval_source"],
+            "sensitivity_summary_source": sensitivity_outputs["summary_source"],
+            "estimator_summary_source": sensitivity_outputs["estimator_summary_source"],
+            "direct_rv": report_data["direct_rv"],
+            "direct_sensitivity_interval": report_data["direct_sensitivity_interval"],
+            "direct_sensitivity_interval_lb": direct_interval_lb,
+            "direct_sensitivity_interval_ub": direct_interval_ub,
+            "direct_sensitivity_summary_available": bool(report_data["direct_sensitivity_summary_text"]),
+            "proxy_primary_candidate": primary_row["confounder"] if primary_row else "",
+            "proxy_cf_y": proxy_cf_y,
+            "proxy_cf_d": proxy_cf_d,
+            "proxy_strength_score": proxy_strength,
+            "proxy_robustness_ratio": proxy_robustness_ratio,
+            "selected_benchmark_confounder": real_benchmark["selected_confounder"],
+            "real_benchmark_available": real_benchmark["available"],
+            "real_benchmark_cf_y": real_benchmark["cf_y"],
+            "real_benchmark_cf_d": real_benchmark["cf_d"],
+            "real_benchmark_strength_score": real_benchmark["strength_score"],
+            "real_benchmark_source": real_benchmark["source"],
             "robustness_ratio": robustness_ratio,
             "run_status": run_status,
-            "warnings": " | ".join(warnings_list),
+            "warnings": " | ".join(dedupe_preserve_order(warnings_list + fallbacks_used)),
         })
 
     except Exception as exc:
@@ -1295,7 +2367,8 @@ def analyze_one_treatment(
         summary_row["warnings"] = " | ".join(warnings_list)
 
     finally:
-        report_data["warnings"] = warnings_list
+        report_data["warnings"] = dedupe_preserve_order(warnings_list)
+        report_data["fallbacks_used"] = dedupe_preserve_order(fallbacks_used)
         report_data["scores_rows"] = scores_rows
         write_rows_to_csv(scores_path, scores_rows, BENCHMARK_SCORE_COLUMNS)
         write_benchmark_report(report_path, report_data)
@@ -1320,6 +2393,7 @@ def main() -> None:
 
     treatment_dirs = sorted(path for path in results_dir.iterdir() if path.is_dir())
     run_summary_csv = build_run_output_csv(results_dir, "benchmark_summary")
+    control_messages_csv = results_dir / "control_messages_analyze_cate_results.csv"
 
     analysis_df = None
     analysis_df_error = None
@@ -1351,7 +2425,20 @@ def main() -> None:
             failed_count += 1
 
     summary_rows.sort(key=lambda row: row["treatment"])
-    write_rows_to_csv(run_summary_csv, summary_rows, RUN_SUMMARY_COLUMNS)
+    clean_summary_rows = finalize_rows(
+        [build_clean_run_summary_row(row) for row in summary_rows],
+        CLEAN_RUN_SUMMARY_COLUMNS,
+    )
+    control_summary_rows = finalize_rows(
+        [build_control_run_summary_row(row) for row in summary_rows],
+        CONTROL_RUN_SUMMARY_COLUMNS,
+    )
+    write_rows_to_csv(run_summary_csv, clean_summary_rows, CLEAN_RUN_SUMMARY_COLUMNS)
+    write_rows_to_csv(
+        control_messages_csv,
+        control_summary_rows,
+        CONTROL_RUN_SUMMARY_COLUMNS,
+    )
 
     print(f"Treatments processed: {len(summary_rows)}")
     print(f"Succeeded: {success_count}")
@@ -1359,6 +2446,7 @@ def main() -> None:
     if partial_count:
         print(f"Partial: {partial_count}")
     print(f"Run-level summary CSV: {run_summary_csv}")
+    print(f"Control messages CSV: {control_messages_csv}")
 
 
 if __name__ == "__main__":

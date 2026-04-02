@@ -1,9 +1,14 @@
-econml
-matplotlib
-networkx
-numpy
-optuna
-pandas
-scikit-learn
-torch
-tqdm
+# Python version (for documentation, not enforced by pip)
+# python==3.10
+
+econml==0.16.0
+scikit-learn==1.4.2
+numpy==1.26.4
+scipy==1.11.4
+
+pandas==2.2.2
+matplotlib==3.8.4
+networkx==3.2.1
+optuna==3.6.1
+torch==2.2.2
+tqdm==4.66.4

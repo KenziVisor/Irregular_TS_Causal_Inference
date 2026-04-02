@@ -3,8 +3,12 @@ from __future__ import annotations
 import argparse
 import os
 import pickle
+import platform
+import sys
 import warnings
-from typing import Dict, List, Set, Tuple
+from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
+from typing import Any, Dict, List, Set, Tuple
 
 import networkx as nx
 import numpy as np
@@ -29,11 +33,13 @@ TREATMENTS = [
     "Inflam", "NeuroFail", "CardInj", "Metab"
 ]
 
-OUTPUT_DIR = "./cate_outputs_predicted_230326"
+OUTPUT_DIR = "../../data/relevant_outputs/cate_outputs_predicted_230326"
 SEED = 42
 DOWN_SAMPLE = False
 USE_EXPANDED_SAFE_CONFOUNDERS = True
 MODEL_TYPE = "CausalForest"   # LinearDML or CausalForest
+DEFAULT_SENSITIVITY_ALPHA = 0.05
+ARTIFACT_SCHEMA_VERSION = 3
 
 
 def str_to_bool(value: str) -> bool:
@@ -104,6 +110,186 @@ def build_run_output_csv(output_dir: str, suffix: str) -> str:
     return os.path.join(output_dir, f"{run_name}_{suffix}.csv")
 
 
+def build_summary_row_id(model_type: str, treatment: str) -> str:
+    safe_model_type = model_type or "unknown_model"
+    return f"{safe_model_type}__{treatment}"
+
+
+def coerce_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, np.generic):
+        return float(value)
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return None
+        if value.size == 1:
+            return float(value.reshape(-1)[0])
+        raise ValueError("Expected a scalar-like value but got an array")
+    if isinstance(value, (list, tuple)):
+        if len(value) != 1:
+            raise ValueError("Expected a scalar-like value but got a sequence")
+        return coerce_float(value[0])
+    return float(value)
+
+
+def normalize_interval_value(
+    value: object,
+) -> Tuple[float | None, float | None] | None:
+    if value is None:
+        return None
+
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return (coerce_float(value[0]), coerce_float(value[1]))
+
+    raise ValueError("Expected sensitivity interval to be a 2-item tuple/list")
+
+
+CLEAN_GLOBAL_SUMMARY_COLUMNS = [
+    "row_id",
+    "treatment",
+    "model_type",
+    "estimator_class",
+    "n",
+    "outcome_rate",
+    "treatment_rate",
+    "treated_outcome_positive_rate",
+    "mean_cate",
+    "std_cate",
+    "min_cate",
+    "max_cate",
+    "mean_normalized_cate",
+    "std_normalized_cate",
+    "min_normalized_cate",
+    "max_normalized_cate",
+    "num_observed_confounders",
+    "num_missing_graph_candidates",
+    "observed_confounders",
+    "missing_graph_candidates",
+    "saved_direct_rv",
+    "saved_direct_sensitivity_interval",
+    "saved_direct_sensitivity_interval_lb",
+    "saved_direct_sensitivity_interval_ub",
+]
+
+
+CONTROL_GLOBAL_SUMMARY_COLUMNS = [
+    "row_id",
+    "treatment",
+    "model_type",
+    "estimator_class",
+    "artifact_schema_version",
+    "econml_version",
+    "sklearn_version",
+    "numpy_version",
+    "pandas_version",
+    "scipy_version",
+    "training_timestamp",
+    "platform",
+    "estimator_module",
+    "cache_values_used",
+    "has_method_robustness_value",
+    "has_method_sensitivity_interval",
+    "has_method_sensitivity_summary",
+    "has_method_summary",
+    "has_attr_residuals",
+    "saved_direct_rv_source",
+    "saved_direct_rv_error",
+    "saved_direct_sensitivity_interval_source",
+    "saved_direct_sensitivity_interval_error",
+    "saved_direct_sensitivity_summary_source",
+    "saved_direct_sensitivity_summary_error",
+    "saved_direct_estimator_summary_source",
+    "saved_direct_estimator_summary_error",
+    "saved_sensitivity_params_available",
+    "saved_sensitivity_params_source",
+    "saved_sensitivity_params_error",
+    "saved_training_residuals_available",
+    "saved_training_residuals_source",
+    "saved_training_residuals_error",
+    "saved_training_residuals_tuple_length",
+    "cate_csv_path",
+    "model_artifact_path",
+]
+
+
+MANAGER_GLOBAL_SUMMARY_COLUMNS = [
+    "model_type",
+    "treatment",
+    "n",
+    "outcome_rate",
+    "treatment_rate",
+    "treated_outcome_positive_rate",
+    "mean_cate",
+    "mean_normalized_cate",
+]
+
+
+def finalize_ordered_dataframe(
+    rows: List[Dict[str, object]],
+    columns: List[str],
+) -> pd.DataFrame:
+    df = pd.DataFrame(rows)
+    for column in columns:
+        if column not in df.columns:
+            df[column] = np.nan
+    return df[columns]
+
+
+def build_clean_global_summary_row(
+    row: Dict[str, object],
+) -> Dict[str, object]:
+    interval_lb = None
+    interval_ub = None
+    interval_value = row.get("saved_direct_sensitivity_interval")
+    if interval_value is not None:
+        try:
+            normalized_interval = normalize_interval_value(interval_value)
+        except Exception:
+            normalized_interval = None
+        if normalized_interval is not None:
+            interval_lb, interval_ub = normalized_interval
+
+    return {
+        "row_id": row["row_id"],
+        "treatment": row["treatment"],
+        "model_type": row["model_type"],
+        "estimator_class": row["estimator_class"],
+        "n": row["n"],
+        "outcome_rate": row["outcome_rate"],
+        "treatment_rate": row["treatment_rate"],
+        "treated_outcome_positive_rate": row["treated_outcome_positive_rate"],
+        "mean_cate": row["mean_cate"],
+        "std_cate": row["std_cate"],
+        "min_cate": row["min_cate"],
+        "max_cate": row["max_cate"],
+        "mean_normalized_cate": row["mean_normalized_cate"],
+        "std_normalized_cate": row["std_normalized_cate"],
+        "min_normalized_cate": row["min_normalized_cate"],
+        "max_normalized_cate": row["max_normalized_cate"],
+        "num_observed_confounders": row["num_observed_confounders"],
+        "num_missing_graph_candidates": row["num_missing_graph_candidates"],
+        "observed_confounders": row["observed_confounders"],
+        "missing_graph_candidates": row["missing_graph_candidates"],
+        "saved_direct_rv": row["saved_direct_rv"],
+        "saved_direct_sensitivity_interval": row["saved_direct_sensitivity_interval"],
+        "saved_direct_sensitivity_interval_lb": interval_lb,
+        "saved_direct_sensitivity_interval_ub": interval_ub,
+    }
+
+
+def build_control_global_summary_row(
+    row: Dict[str, object],
+) -> Dict[str, object]:
+    return {
+        column: row.get(column)
+        for column in CONTROL_GLOBAL_SUMMARY_COLUMNS
+    }
+
+
 # ============================================================
 # Data loading
 # ============================================================
@@ -132,6 +318,84 @@ def load_model_artifact(path: str) -> Dict[str, object]:
     if not isinstance(artifact, dict):
         raise TypeError("Loaded model artifact is not a dict")
     return artifact
+
+
+def get_installed_version(package_name: str) -> str | None:
+    try:
+        return importlib_metadata.version(package_name)
+    except importlib_metadata.PackageNotFoundError:
+        return None
+
+
+def collect_environment_metadata() -> Dict[str, object]:
+    return {
+        "python_version": sys.version.replace("\n", " "),
+        "platform": platform.platform(),
+        "econml_version": get_installed_version("econml"),
+        "sklearn_version": get_installed_version("scikit-learn"),
+        "numpy_version": get_installed_version("numpy"),
+        "pandas_version": get_installed_version("pandas"),
+        "scipy_version": get_installed_version("scipy"),
+        "matplotlib_version": get_installed_version("matplotlib"),
+        "networkx_version": get_installed_version("networkx"),
+        "optuna_version": get_installed_version("optuna"),
+        "torch_version": get_installed_version("torch"),
+        "training_timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def log_environment_metadata(env_metadata: Dict[str, object]) -> None:
+    print("Runtime environment:")
+    for key in [
+        "python_version",
+        "platform",
+        "econml_version",
+        "sklearn_version",
+        "numpy_version",
+        "pandas_version",
+        "scipy_version",
+        "matplotlib_version",
+        "networkx_version",
+        "optuna_version",
+        "torch_version",
+    ]:
+        print(f"  {key}: {env_metadata.get(key)}")
+
+
+def has_attribute(obj: object, attr_name: str) -> bool:
+    try:
+        getattr(obj, attr_name)
+    except Exception:
+        return False
+    return True
+
+
+def has_callable_attribute(obj: object, attr_name: str) -> bool:
+    try:
+        value = getattr(obj, attr_name)
+    except Exception:
+        return False
+    return callable(value)
+
+
+def collect_estimator_method_availability(est: object) -> Dict[str, bool]:
+    return {
+        "has_method_robustness_value": has_callable_attribute(est, "robustness_value"),
+        "has_method_sensitivity_interval": has_callable_attribute(est, "sensitivity_interval"),
+        "has_method_sensitivity_summary": has_callable_attribute(est, "sensitivity_summary"),
+        "has_method_summary": has_callable_attribute(est, "summary"),
+        "has_attr_residuals": has_attribute(est, "residuals_"),
+    }
+
+
+def format_estimator_method_availability(availability: Dict[str, bool]) -> str:
+    return ", ".join([
+        f"robustness_value={availability.get('has_method_robustness_value')}",
+        f"sensitivity_interval={availability.get('has_method_sensitivity_interval')}",
+        f"sensitivity_summary={availability.get('has_method_sensitivity_summary')}",
+        f"summary={availability.get('has_method_summary')}",
+        f"residuals_={availability.get('has_attr_residuals')}",
+    ])
 
 
 def build_effect_modifier_matrix(
@@ -755,6 +1019,345 @@ def make_dml_estimator():
     )
 
 
+def format_exception(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+def serialize_scalar_or_array(value: object) -> object:
+    if value is None:
+        return None
+
+    arr = np.asarray(value)
+    if arr.ndim == 0:
+        scalar = arr.item()
+        if isinstance(scalar, (np.integer, int)) and not isinstance(scalar, bool):
+            return int(scalar)
+        if isinstance(scalar, (np.floating, float)):
+            return float(scalar)
+        return scalar
+
+    return arr.tolist()
+
+
+def serialize_json_safe(value: Any) -> object:
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, (np.integer, int)) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, pd.DataFrame):
+        return value.reset_index().to_dict(orient="records")
+    if isinstance(value, pd.Series):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {str(key): serialize_json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [serialize_json_safe(item) for item in value]
+    if hasattr(value, "_asdict"):
+        try:
+            return serialize_json_safe(value._asdict())
+        except Exception:
+            pass
+    if hasattr(value, "tolist"):
+        try:
+            return value.tolist()
+        except Exception:
+            pass
+    if hasattr(value, "__dict__"):
+        try:
+            public_items = {
+                key: serialize_json_safe(val)
+                for key, val in vars(value).items()
+                if not key.startswith("_")
+            }
+            if public_items:
+                return public_items
+        except Exception:
+            pass
+    return repr(value)
+
+
+def serialize_sensitivity_object(value: object) -> object:
+    known_attrs = {}
+    for attr_name in ["theta", "sigma", "sigma2", "nu", "nu2", "cov", "covariance"]:
+        if not has_attribute(value, attr_name):
+            continue
+        try:
+            known_attrs[attr_name] = serialize_json_safe(getattr(value, attr_name))
+        except Exception as exc:
+            known_attrs[f"{attr_name}_error"] = format_exception(exc)
+
+    if known_attrs:
+        return {
+            "type": type(value).__name__,
+            "module": type(value).__module__,
+            "attributes": known_attrs,
+        }
+
+    return serialize_json_safe(value)
+
+
+def collect_sensitivity_params_snapshot(est: object) -> Dict[str, object]:
+    candidate_names = [
+        "sensitivity_params",
+        "sensitivity_params_",
+        "_sensitivity_params",
+        "sensitivity_elements",
+        "_sensitivity_elements",
+    ]
+    extra_names = sorted(
+        name for name in dir(est)
+        if "sensitivity" in name.lower() and name not in candidate_names
+    )
+
+    errors: List[str] = []
+    for attr_name in candidate_names + extra_names:
+        try:
+            value = getattr(est, attr_name)
+        except AttributeError:
+            continue
+        except Exception as exc:
+            errors.append(f"{attr_name}: {format_exception(exc)}")
+            continue
+
+        if callable(value):
+            errors.append(f"{attr_name}: callable attribute, not raw sensitivity params")
+            continue
+
+        try:
+            serialized = serialize_sensitivity_object(value)
+        except Exception as exc:
+            return {
+                "saved_sensitivity_params_available": False,
+                "saved_sensitivity_params_source": f"estimator.{attr_name}",
+                "saved_sensitivity_params_error": format_exception(exc),
+                "saved_sensitivity_params_serialized": None,
+            }
+
+        return {
+            "saved_sensitivity_params_available": True,
+            "saved_sensitivity_params_source": f"estimator.{attr_name}",
+            "saved_sensitivity_params_error": None,
+            "saved_sensitivity_params_serialized": serialized,
+        }
+
+    error_message = "No non-callable sensitivity parameter attribute found on estimator"
+    if errors:
+        error_message = f"{error_message}; checked attributes: {' | '.join(errors)}"
+
+    return {
+        "saved_sensitivity_params_available": False,
+        "saved_sensitivity_params_source": "not_exposed_in_training_env",
+        "saved_sensitivity_params_error": error_message,
+        "saved_sensitivity_params_serialized": None,
+    }
+
+
+def attempt_direct_estimator_call(
+    est: object,
+    method_name: str,
+    candidate_kwargs: List[Dict[str, object]],
+) -> Tuple[object | None, str, str | None]:
+    if not has_attribute(est, method_name):
+        return None, "api_absent_in_training_env", (
+            f"Estimator does not expose '{method_name}'"
+        )
+
+    method = getattr(est, method_name)
+    if not callable(method):
+        return None, "attribute_not_callable_in_training_env", (
+            f"Estimator attribute '{method_name}' is not callable"
+        )
+
+    last_error: Exception | None = None
+    for kwargs in candidate_kwargs:
+        try:
+            return method(**kwargs), "saved_training_direct", None
+        except Exception as exc:
+            last_error = exc
+
+    if last_error is None:
+        return None, "training_direct_call_failed", (
+            f"Unable to call '{method_name}'"
+        )
+    return None, "training_direct_call_failed", format_exception(last_error)
+
+
+def extract_estimator_summary_text(
+    est: object,
+    effect_modifiers: List[str],
+) -> Tuple[str | None, str, str | None]:
+    if not has_callable_attribute(est, "summary"):
+        return None, "api_absent_in_training_env", "Estimator does not expose 'summary'"
+
+    method = getattr(est, "summary")
+    candidate_kwargs: List[Dict[str, object]] = []
+    if effect_modifiers:
+        candidate_kwargs.append({"feature_names": effect_modifiers})
+    candidate_kwargs.append({})
+
+    last_error: Exception | None = None
+    for kwargs in candidate_kwargs:
+        try:
+            return str(method(**kwargs)), "saved_training_direct", None
+        except Exception as exc:
+            last_error = exc
+
+    if last_error is None:
+        return None, "training_direct_call_failed", "Unable to call 'summary'"
+    return None, "training_direct_call_failed", format_exception(last_error)
+
+
+def collect_direct_diagnostics(
+    est: object,
+    effect_modifiers: List[str],
+) -> Dict[str, object]:
+    diagnostics: Dict[str, object] = {}
+    availability = collect_estimator_method_availability(est)
+    diagnostics.update(availability)
+
+    method_specs = {
+        "robustness_value": [
+            {},
+            {"null_hypothesis": 0.0, "alpha": DEFAULT_SENSITIVITY_ALPHA},
+        ],
+        "sensitivity_summary": [
+            {},
+            {"null_hypothesis": 0.0, "alpha": DEFAULT_SENSITIVITY_ALPHA},
+        ],
+        "sensitivity_interval": [
+            {},
+            {"alpha": DEFAULT_SENSITIVITY_ALPHA, "interval_type": "ci"},
+        ],
+    }
+
+    key_map = {
+        "robustness_value": ("saved_direct_rv", "direct_robustness_value"),
+        "sensitivity_interval": (
+            "saved_direct_sensitivity_interval",
+            "direct_sensitivity_interval",
+        ),
+        "sensitivity_summary": (
+            "saved_direct_sensitivity_summary",
+            "direct_sensitivity_summary",
+        ),
+    }
+
+    for method_name, candidate_kwargs in method_specs.items():
+        value, source, error = attempt_direct_estimator_call(
+            est=est,
+            method_name=method_name,
+            candidate_kwargs=candidate_kwargs,
+        )
+        artifact_key, legacy_key = key_map[method_name]
+        diagnostics[artifact_key] = None
+        diagnostics[f"{artifact_key}_source"] = source
+        diagnostics[f"{artifact_key}_error"] = error
+        diagnostics[legacy_key] = None
+        diagnostics[f"{legacy_key}_source"] = source
+        diagnostics[f"{legacy_key}_error"] = error
+
+        if value is None:
+            continue
+
+        if method_name == "sensitivity_summary":
+            serialized_value = str(value)
+        elif method_name == "sensitivity_interval":
+            try:
+                lb, ub = value
+                serialized_value = [
+                    serialize_scalar_or_array(lb),
+                    serialize_scalar_or_array(ub),
+                ]
+            except Exception as exc:
+                serialized_value = None
+                error = format_exception(exc)
+                diagnostics[f"{artifact_key}_error"] = error
+                diagnostics[f"{legacy_key}_error"] = error
+        else:
+            serialized_value = serialize_scalar_or_array(value)
+
+        diagnostics[artifact_key] = serialized_value
+        diagnostics[legacy_key] = serialized_value
+
+    try:
+        residuals = est.residuals_
+        diagnostics["direct_residuals_available"] = True
+        diagnostics["direct_residuals_tuple_length"] = len(residuals) if isinstance(
+            residuals, (tuple, list)
+        ) else None
+        diagnostics["direct_residuals_error"] = None
+        diagnostics["saved_training_residuals_available"] = True
+        diagnostics["saved_training_residuals_source"] = "saved_training_direct"
+        diagnostics["saved_training_residuals_error"] = None
+        diagnostics["saved_training_residuals_tuple_length"] = diagnostics[
+            "direct_residuals_tuple_length"
+        ]
+    except Exception as exc:
+        diagnostics["direct_residuals_available"] = False
+        diagnostics["direct_residuals_tuple_length"] = None
+        diagnostics["direct_residuals_error"] = format_exception(exc)
+        diagnostics["saved_training_residuals_available"] = False
+        diagnostics["saved_training_residuals_source"] = "training_direct_call_failed"
+        diagnostics["saved_training_residuals_error"] = format_exception(exc)
+        diagnostics["saved_training_residuals_tuple_length"] = None
+
+    summary_text, summary_source, summary_error = extract_estimator_summary_text(
+        est=est,
+        effect_modifiers=effect_modifiers,
+    )
+    diagnostics["saved_direct_estimator_summary_text"] = summary_text
+    diagnostics["saved_direct_estimator_summary_source"] = summary_source
+    diagnostics["saved_direct_estimator_summary_error"] = summary_error
+    diagnostics["direct_estimator_summary_text"] = summary_text
+    diagnostics["direct_estimator_summary_source"] = summary_source
+    diagnostics["direct_estimator_summary_error"] = summary_error
+
+    diagnostics.update(collect_sensitivity_params_snapshot(est))
+
+    if isinstance(est, LinearDML):
+        try:
+            diagnostics["linear_coef"] = serialize_scalar_or_array(est.coef_)
+        except Exception as exc:
+            diagnostics["linear_coef"] = None
+            diagnostics["linear_coef_error"] = format_exception(exc)
+
+        try:
+            diagnostics["linear_intercept"] = serialize_scalar_or_array(est.intercept_)
+        except Exception as exc:
+            diagnostics["linear_intercept"] = None
+            diagnostics["linear_intercept_error"] = format_exception(exc)
+
+        try:
+            coef_inference = est.coef__inference()
+            diagnostics["linear_coef_inference_table"] = (
+                coef_inference.summary_frame().reset_index().to_dict(orient="records")
+            )
+            diagnostics["linear_coef_inference_error"] = None
+        except Exception as exc:
+            diagnostics["linear_coef_inference_table"] = None
+            diagnostics["linear_coef_inference_error"] = format_exception(exc)
+
+    if isinstance(est, CausalForestDML):
+        try:
+            importances = np.asarray(est.feature_importances_, dtype=float).reshape(-1)
+            diagnostics["causal_forest_feature_importances"] = importances.tolist()
+            diagnostics["causal_forest_feature_importance_by_modifier"] = [
+                {"variable": variable, "importance": float(importance)}
+                for variable, importance in zip(effect_modifiers, importances)
+            ]
+            diagnostics["causal_forest_feature_importances_error"] = None
+        except Exception as exc:
+            diagnostics["causal_forest_feature_importances"] = None
+            diagnostics["causal_forest_feature_importance_by_modifier"] = None
+            diagnostics["causal_forest_feature_importances_error"] = format_exception(exc)
+
+    return diagnostics
+
+
 def fit_one_treatment(
     df: pd.DataFrame,
     treatment: str,
@@ -829,8 +1432,18 @@ def fit_one_treatment(
     X = model_df[effect_modifiers].astype(float).to_numpy() if effect_modifiers else None
 
     est = make_dml_estimator()
+    pre_fit_availability = collect_estimator_method_availability(est)
+    print(
+        f"[{treatment}] estimator method availability before fit: "
+        f"{format_estimator_method_availability(pre_fit_availability)}"
+    )
 
-    est.fit(Y=Y, T=T, X=X, W=W)
+    est.fit(Y=Y, T=T, X=X, W=W, cache_values=True)
+    post_fit_availability = collect_estimator_method_availability(est)
+    print(
+        f"[{treatment}] estimator method availability after fit: "
+        f"{format_estimator_method_availability(post_fit_availability)}"
+    )
     cate = est.effect(X=X)
 
     out = model_df[["ts_id", treatment, OUTCOME_COL]].copy()
@@ -891,16 +1504,117 @@ def fit_one_treatment(
         "max_normalized_cate": float(out["normalized_CATE"].max()) if out["normalized_CATE"].notna().any() else np.nan,
     }
 
+    direct_diagnostics = collect_direct_diagnostics(
+        est=est,
+        effect_modifiers=effect_modifiers,
+    )
+    print(
+        f"[{treatment}] direct sensitivity extraction sources: "
+        f"rv={direct_diagnostics['saved_direct_rv_source']}, "
+        f"interval={direct_diagnostics['saved_direct_sensitivity_interval_source']}, "
+        f"summary={direct_diagnostics['saved_direct_sensitivity_summary_source']}"
+    )
+    for label, error_key in [
+        ("rv", "saved_direct_rv_error"),
+        ("sensitivity_interval", "saved_direct_sensitivity_interval_error"),
+        ("sensitivity_summary", "saved_direct_sensitivity_summary_error"),
+        ("estimator_summary_text", "saved_direct_estimator_summary_error"),
+    ]:
+        if direct_diagnostics.get(error_key):
+            print(f"[{treatment}] {label} detail: {direct_diagnostics[error_key]}")
+
+    print(
+        f"[{treatment}] raw sensitivity params saved: "
+        f"{direct_diagnostics['saved_sensitivity_params_available']} "
+        f"(source={direct_diagnostics['saved_sensitivity_params_source']})"
+    )
+    if direct_diagnostics.get("saved_sensitivity_params_error"):
+        print(
+            f"[{treatment}] raw sensitivity params detail: "
+            f"{direct_diagnostics['saved_sensitivity_params_error']}"
+        )
+
+    env_metadata = collect_environment_metadata()
+
     model_artifact = {
         "estimator": est,
+        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        **env_metadata,
+        "estimator_module": type(est).__module__,
         "model_type": MODEL_TYPE,
         "treatment": treatment,
         "outcome_col": OUTCOME_COL,
         "confounders": confounders,
         "effect_modifiers": effect_modifiers,
+        "cache_values_used": True,
+        "estimator_class": type(est).__name__,
+        "has_method_robustness_value": post_fit_availability["has_method_robustness_value"],
+        "has_method_sensitivity_interval": post_fit_availability["has_method_sensitivity_interval"],
+        "has_method_sensitivity_summary": post_fit_availability["has_method_sensitivity_summary"],
+        "has_method_summary": post_fit_availability["has_method_summary"],
+        "has_attr_residuals": post_fit_availability["has_attr_residuals"],
+        "estimator_method_availability_pre_fit": pre_fit_availability,
+        "estimator_method_availability_post_fit": post_fit_availability,
+        "confounders_order": list(confounders),
+        "effect_modifiers_order": list(effect_modifiers),
         "feature_fill_values": fill_values,
         "formula": formula,
         "summary": summary,
+        "saved_direct_rv": direct_diagnostics["saved_direct_rv"],
+        "saved_direct_rv_source": direct_diagnostics["saved_direct_rv_source"],
+        "saved_direct_rv_error": direct_diagnostics["saved_direct_rv_error"],
+        "saved_direct_sensitivity_interval": direct_diagnostics[
+            "saved_direct_sensitivity_interval"
+        ],
+        "saved_direct_sensitivity_interval_source": direct_diagnostics[
+            "saved_direct_sensitivity_interval_source"
+        ],
+        "saved_direct_sensitivity_interval_error": direct_diagnostics[
+            "saved_direct_sensitivity_interval_error"
+        ],
+        "saved_direct_sensitivity_summary": direct_diagnostics[
+            "saved_direct_sensitivity_summary"
+        ],
+        "saved_direct_sensitivity_summary_source": direct_diagnostics[
+            "saved_direct_sensitivity_summary_source"
+        ],
+        "saved_direct_sensitivity_summary_error": direct_diagnostics[
+            "saved_direct_sensitivity_summary_error"
+        ],
+        "saved_direct_estimator_summary_text": direct_diagnostics[
+            "saved_direct_estimator_summary_text"
+        ],
+        "saved_direct_estimator_summary_source": direct_diagnostics[
+            "saved_direct_estimator_summary_source"
+        ],
+        "saved_direct_estimator_summary_error": direct_diagnostics[
+            "saved_direct_estimator_summary_error"
+        ],
+        "saved_sensitivity_params_available": direct_diagnostics[
+            "saved_sensitivity_params_available"
+        ],
+        "saved_sensitivity_params_source": direct_diagnostics[
+            "saved_sensitivity_params_source"
+        ],
+        "saved_sensitivity_params_error": direct_diagnostics[
+            "saved_sensitivity_params_error"
+        ],
+        "saved_sensitivity_params_serialized": direct_diagnostics[
+            "saved_sensitivity_params_serialized"
+        ],
+        "saved_training_residuals_available": direct_diagnostics[
+            "saved_training_residuals_available"
+        ],
+        "saved_training_residuals_source": direct_diagnostics[
+            "saved_training_residuals_source"
+        ],
+        "saved_training_residuals_error": direct_diagnostics[
+            "saved_training_residuals_error"
+        ],
+        "saved_training_residuals_tuple_length": direct_diagnostics[
+            "saved_training_residuals_tuple_length"
+        ],
+        "direct_diagnostics": direct_diagnostics,
     }
 
     return est, out, summary, formula, model_artifact
@@ -991,6 +1705,7 @@ def write_summary_results(
     confounder_info: Dict[str, List[str]],
     cate_csv_path: str,
     model_artifact_path: str,
+    model_artifact: Dict[str, object],
 ):
     with open(path, "w", encoding="utf-8") as f:
         f.write("=== CATE Summary Results ===\n\n")
@@ -1022,6 +1737,95 @@ def write_summary_results(
         f.write(f"Min normalized CATE: {summary['min_normalized_cate']:.6f}\n")
         f.write(f"Max normalized CATE: {summary['max_normalized_cate']:.6f}\n\n")
 
+        f.write("Training-time extraction diagnostics:\n")
+        f.write(f"Artifact schema version: {model_artifact.get('artifact_schema_version')}\n")
+        f.write(f"Training timestamp: {model_artifact.get('training_timestamp')}\n")
+        f.write(f"Python version: {model_artifact.get('python_version')}\n")
+        f.write(f"Platform: {model_artifact.get('platform')}\n")
+        f.write(f"EconML version: {model_artifact.get('econml_version')}\n")
+        f.write(f"scikit-learn version: {model_artifact.get('sklearn_version')}\n")
+        f.write(f"NumPy version: {model_artifact.get('numpy_version')}\n")
+        f.write(f"Pandas version: {model_artifact.get('pandas_version')}\n")
+        f.write(f"SciPy version: {model_artifact.get('scipy_version')}\n")
+        f.write(f"Estimator module: {model_artifact.get('estimator_module')}\n")
+        f.write(f"Estimator class: {model_artifact.get('estimator_class')}\n")
+        f.write(f"cache_values_used: {model_artifact.get('cache_values_used')}\n")
+        f.write(
+            "Method availability after fit: "
+            f"robustness_value={model_artifact.get('has_method_robustness_value')}, "
+            f"sensitivity_interval={model_artifact.get('has_method_sensitivity_interval')}, "
+            f"sensitivity_summary={model_artifact.get('has_method_sensitivity_summary')}, "
+            f"summary={model_artifact.get('has_method_summary')}, "
+            f"residuals_={model_artifact.get('has_attr_residuals')}\n"
+        )
+        f.write(f"Saved direct RV value: {model_artifact.get('saved_direct_rv')}\n")
+        f.write(
+            f"Saved direct RV source: {model_artifact.get('saved_direct_rv_source')}\n"
+        )
+        f.write(
+            f"Saved direct RV error: {model_artifact.get('saved_direct_rv_error')}\n"
+        )
+        f.write(
+            "Saved direct sensitivity interval value: "
+            f"{model_artifact.get('saved_direct_sensitivity_interval')}\n"
+        )
+        f.write(
+            "Saved direct sensitivity interval source: "
+            f"{model_artifact.get('saved_direct_sensitivity_interval_source')}\n"
+        )
+        f.write(
+            "Saved direct sensitivity interval error: "
+            f"{model_artifact.get('saved_direct_sensitivity_interval_error')}\n"
+        )
+        f.write(
+            "Saved direct sensitivity summary text: "
+            f"{model_artifact.get('saved_direct_sensitivity_summary')}\n"
+        )
+        f.write(
+            "Saved direct sensitivity summary source: "
+            f"{model_artifact.get('saved_direct_sensitivity_summary_source')}\n"
+        )
+        f.write(
+            "Saved direct sensitivity summary error: "
+            f"{model_artifact.get('saved_direct_sensitivity_summary_error')}\n"
+        )
+        f.write(
+            "Saved direct estimator summary text source: "
+            f"{model_artifact.get('saved_direct_estimator_summary_source')}\n"
+        )
+        f.write(
+            "Saved direct estimator summary text error: "
+            f"{model_artifact.get('saved_direct_estimator_summary_error')}\n"
+        )
+        f.write(
+            "Saved sensitivity params available: "
+            f"{model_artifact.get('saved_sensitivity_params_available')}\n"
+        )
+        f.write(
+            "Saved sensitivity params source: "
+            f"{model_artifact.get('saved_sensitivity_params_source')}\n"
+        )
+        f.write(
+            "Saved sensitivity params error: "
+            f"{model_artifact.get('saved_sensitivity_params_error')}\n\n"
+        )
+        f.write(
+            "Saved training residuals available: "
+            f"{model_artifact.get('saved_training_residuals_available')}\n"
+        )
+        f.write(
+            "Saved training residuals source: "
+            f"{model_artifact.get('saved_training_residuals_source')}\n"
+        )
+        f.write(
+            "Saved training residuals error: "
+            f"{model_artifact.get('saved_training_residuals_error')}\n"
+        )
+        f.write(
+            "Saved training residuals tuple length: "
+            f"{model_artifact.get('saved_training_residuals_tuple_length')}\n\n"
+        )
+
         f.write(f"Per-patient CATE file: {cate_csv_path}\n")
         f.write(f"Saved model artifact: {model_artifact_path}\n")
 
@@ -1040,6 +1844,8 @@ def main():
 
     warnings.filterwarnings("ignore", category=FutureWarning)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    startup_env_metadata = collect_environment_metadata()
+    log_environment_metadata(startup_env_metadata)
 
     print("Loading dataframe and graph...")
     df = load_analysis_dataframe(LATENT_TAGS_PATH, PHYSIONET_PKL_PATH)
@@ -1166,9 +1972,12 @@ def main():
                 confounder_info=confounder_info,
                 cate_csv_path=cate_csv,
                 model_artifact_path=model_pkl,
+                model_artifact=model_artifact,
             )
 
             global_summary_rows.append({
+                "row_id": build_summary_row_id(summary["model_type"], treatment),
+                "artifact_schema_version": model_artifact["artifact_schema_version"],
                 "model_type": summary["model_type"],
                 "treatment": treatment,
                 "n": int(summary["n"]),
@@ -1187,6 +1996,66 @@ def main():
                 "num_missing_graph_candidates": len(confounder_info["missing_graph_nodes"]),
                 "observed_confounders": ", ".join(confounder_info["observed_confounders"]),
                 "missing_graph_candidates": ", ".join(confounder_info["missing_graph_nodes"]),
+                "econml_version": model_artifact["econml_version"],
+                "sklearn_version": model_artifact["sklearn_version"],
+                "numpy_version": model_artifact["numpy_version"],
+                "pandas_version": model_artifact["pandas_version"],
+                "scipy_version": model_artifact["scipy_version"],
+                "training_timestamp": model_artifact["training_timestamp"],
+                "platform": model_artifact["platform"],
+                "estimator_module": model_artifact["estimator_module"],
+                "estimator_class": model_artifact["estimator_class"],
+                "cache_values_used": model_artifact["cache_values_used"],
+                "has_method_robustness_value": model_artifact["has_method_robustness_value"],
+                "has_method_sensitivity_interval": model_artifact["has_method_sensitivity_interval"],
+                "has_method_sensitivity_summary": model_artifact["has_method_sensitivity_summary"],
+                "has_method_summary": model_artifact["has_method_summary"],
+                "has_attr_residuals": model_artifact["has_attr_residuals"],
+                "saved_direct_rv": model_artifact["saved_direct_rv"],
+                "saved_direct_rv_source": model_artifact["saved_direct_rv_source"],
+                "saved_direct_rv_error": model_artifact["saved_direct_rv_error"],
+                "saved_direct_sensitivity_interval": model_artifact[
+                    "saved_direct_sensitivity_interval"
+                ],
+                "saved_direct_sensitivity_interval_source": model_artifact[
+                    "saved_direct_sensitivity_interval_source"
+                ],
+                "saved_direct_sensitivity_interval_error": model_artifact[
+                    "saved_direct_sensitivity_interval_error"
+                ],
+                "saved_direct_sensitivity_summary_source": model_artifact[
+                    "saved_direct_sensitivity_summary_source"
+                ],
+                "saved_direct_sensitivity_summary_error": model_artifact[
+                    "saved_direct_sensitivity_summary_error"
+                ],
+                "saved_direct_estimator_summary_source": model_artifact[
+                    "saved_direct_estimator_summary_source"
+                ],
+                "saved_direct_estimator_summary_error": model_artifact[
+                    "saved_direct_estimator_summary_error"
+                ],
+                "saved_sensitivity_params_available": model_artifact[
+                    "saved_sensitivity_params_available"
+                ],
+                "saved_sensitivity_params_source": model_artifact[
+                    "saved_sensitivity_params_source"
+                ],
+                "saved_sensitivity_params_error": model_artifact[
+                    "saved_sensitivity_params_error"
+                ],
+                "saved_training_residuals_available": model_artifact[
+                    "saved_training_residuals_available"
+                ],
+                "saved_training_residuals_source": model_artifact[
+                    "saved_training_residuals_source"
+                ],
+                "saved_training_residuals_error": model_artifact[
+                    "saved_training_residuals_error"
+                ],
+                "saved_training_residuals_tuple_length": model_artifact[
+                    "saved_training_residuals_tuple_length"
+                ],
                 "cate_csv_path": cate_csv,
                 "model_artifact_path": model_pkl,
             })
@@ -1213,9 +2082,16 @@ def main():
         OUTPUT_DIR,
         "manager_global_summary",
     )
+    control_messages_csv = os.path.join(
+        OUTPUT_DIR,
+        "control_messages_cate_estimation.csv",
+    )
 
     if global_summary_rows:
-        global_summary_df = pd.DataFrame(global_summary_rows)
+        global_summary_df = finalize_ordered_dataframe(
+            [build_clean_global_summary_row(row) for row in global_summary_rows],
+            CLEAN_GLOBAL_SUMMARY_COLUMNS,
+        )
         global_summary_df = global_summary_df.sort_values(
             by="mean_cate",
             ascending=False
@@ -1223,17 +2099,21 @@ def main():
         global_summary_df.to_csv(global_summary_csv, index=False)
         print(f"\nSaved global summary: {global_summary_csv}")
 
+        control_messages_df = finalize_ordered_dataframe(
+            [build_control_global_summary_row(row) for row in global_summary_rows],
+            CONTROL_GLOBAL_SUMMARY_COLUMNS,
+        )
+        control_messages_df["row_sort_order"] = control_messages_df["row_id"].map({
+            row_id: idx for idx, row_id in enumerate(global_summary_df["row_id"].tolist())
+        })
+        control_messages_df = control_messages_df.sort_values(
+            by="row_sort_order"
+        ).drop(columns="row_sort_order")
+        control_messages_df.to_csv(control_messages_csv, index=False)
+        print(f"Saved control messages: {control_messages_csv}")
+
         manager_global_summary_df = global_summary_df[
-            [
-                "model_type",
-                "treatment",
-                "n",
-                "outcome_rate",
-                "treatment_rate",
-                "treated_outcome_positive_rate",
-                "mean_cate",
-                "mean_normalized_cate",
-            ]
+            MANAGER_GLOBAL_SUMMARY_COLUMNS
         ].copy()
         manager_global_summary_df.to_csv(manager_global_summary_csv, index=False)
         print(f"Saved manager global summary: {manager_global_summary_csv}")
