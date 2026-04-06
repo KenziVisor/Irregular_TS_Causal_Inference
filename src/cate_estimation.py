@@ -4,6 +4,7 @@ import argparse
 import os
 import pickle
 import platform
+import re
 import sys
 import warnings
 from datetime import datetime, timezone
@@ -38,6 +39,10 @@ MIMIC_TREATMENTS = [
     "CardiacInjury", "MetabolicDerangement",
 ]
 TREATMENTS = list(PHYSIONET_TREATMENTS)
+BACKGROUND_FEATURE_COLUMNS = [
+    "Age", "Gender", "Weight",
+    "ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4",
+]
 
 OUTPUT_DIR = "../../data/relevant_outputs/cate_outputs_predicted_230326"
 SEED = 42
@@ -631,17 +636,119 @@ def build_effect_modifier_matrix(
     return X_df[effect_modifiers].astype(float).to_numpy()
 
 
-def build_background_features(ts: pd.DataFrame) -> pd.DataFrame:
+def log_dataframe_columns(name: str, df: pd.DataFrame) -> None:
+    print(f"[{name}] columns ({len(df.columns)}): {list(df.columns)}")
+
+
+def log_non_null_counts(
+    name: str,
+    df: pd.DataFrame,
+    columns: List[str],
+) -> None:
+    print(f"[{name}] non-null counts:")
+    for column in columns:
+        if column in df.columns:
+            print(f"  {column}: {int(df[column].notna().sum())}")
+        else:
+            print(f"  {column}: MISSING")
+
+
+def find_merge_style_variants(
+    available_columns: List[str],
+    expected_column: str,
+) -> List[str]:
+    pattern = re.compile(
+        rf"^{re.escape(expected_column)}(?:_[xy]|\.\d+|__[A-Za-z0-9]+)$"
+    )
+    return [
+        column for column in available_columns
+        if column == expected_column or pattern.fullmatch(column)
+    ]
+
+
+def normalize_expected_columns(
+    df: pd.DataFrame,
+    expected_columns: List[str],
+    *,
+    source_name: str,
+) -> pd.DataFrame:
+    out = df.copy()
+
+    for expected_column in expected_columns:
+        candidate_columns = find_merge_style_variants(
+            list(out.columns),
+            expected_column,
+        )
+        if not candidate_columns:
+            continue
+        if candidate_columns == [expected_column]:
+            continue
+
+        non_null_counts = {
+            column: int(out[column].notna().sum())
+            for column in candidate_columns
+        }
+
+        if (
+            expected_column in non_null_counts
+            and non_null_counts[expected_column] > 0
+        ):
+            selected_column = expected_column
+        else:
+            selected_column = max(
+                candidate_columns,
+                key=lambda column: (
+                    non_null_counts[column],
+                    column == expected_column,
+                    column.endswith("_x"),
+                    column.endswith("__latent"),
+                    -len(column),
+                ),
+            )
+
+        print(
+            f"[{source_name}] Normalizing '{expected_column}' from candidates "
+            f"{candidate_columns} with non-null counts {non_null_counts}. "
+            f"Selected: {selected_column}"
+        )
+        out[expected_column] = out[selected_column]
+
+        duplicate_columns = [
+            column for column in candidate_columns
+            if column != expected_column
+        ]
+        if duplicate_columns:
+            print(
+                f"[{source_name}] Dropping duplicate/suffixed columns for "
+                f"'{expected_column}': {duplicate_columns}"
+            )
+            out = out.drop(columns=duplicate_columns)
+
+    return out
+
+
+def build_background_features(
+    ts: pd.DataFrame,
+    dataset_model: str | None = None,
+) -> pd.DataFrame:
     """
     Build patient-level observed background covariates from ts.
-    Preprocessing already converts ICUType into ICUType_1..ICUType_4.
+    PhysioNet preprocessing already converts ICUType into ICUType_1..ICUType_4.
+    MIMIC does not guarantee those columns, so only keep what is actually present.
     """
+    current_model = DATASET_MODEL if dataset_model is None else dataset_model
     df = ts.copy().sort_values(["ts_id", "minute"])
 
-    keep_vars = [
-        "Age", "Gender", "Weight",
-        "ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"
-    ]
+    keep_vars = ["Age", "Gender", "Weight"]
+    if current_model == "physionet":
+        keep_vars += ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]
+    else:
+        available_variables = set(df["variable"].astype(str).tolist())
+        keep_vars += [
+            col for col in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]
+            if col in available_variables
+        ]
+
     df = df[df["variable"].isin(keep_vars)].copy()
 
     first_vals = (
@@ -651,9 +758,10 @@ def build_background_features(ts: pd.DataFrame) -> pd.DataFrame:
 
     bg = first_vals.pivot(index="ts_id", columns="variable", values="value").reset_index()
 
-    for col in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]:
-        if col not in bg.columns:
-            bg[col] = 0.0
+    if current_model == "physionet":
+        for col in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]:
+            if col not in bg.columns:
+                bg[col] = 0.0
 
     return bg
 
@@ -661,11 +769,15 @@ def build_background_features(ts: pd.DataFrame) -> pd.DataFrame:
 def load_analysis_dataframe(
     latent_tags_path: str,
     physionet_pkl_path: str,
+    model: str | None = None,
 ) -> pd.DataFrame:
+    current_model = DATASET_MODEL if model is None else model
     latent_df = pd.read_csv(latent_tags_path)
+    log_dataframe_columns("latent_df_raw", latent_df)
+
     if "ts_id" in latent_df.columns:
         latent_df = latent_df.copy()
-    elif DATASET_MODEL == "mimic" and "icustay_id" in latent_df.columns:
+    elif current_model == "mimic" and "icustay_id" in latent_df.columns:
         latent_df = latent_df.rename(columns={"icustay_id": "ts_id"}).copy()
     else:
         raise ValueError(
@@ -673,22 +785,106 @@ def load_analysis_dataframe(
             f"--model mimic is used. Source: {latent_tags_path}"
         )
     latent_df["ts_id"] = latent_df["ts_id"].astype(str)
+    latent_df = normalize_expected_columns(
+        latent_df,
+        list(TREATMENTS),
+        source_name="latent_df",
+    )
+    log_dataframe_columns("latent_df_normalized", latent_df)
 
     ts, oc, _ = load_physionet_pickle(physionet_pkl_path)
+    if OUTCOME_COL not in oc.columns:
+        raise ValueError(
+            f"Processed pickle is missing outcome column '{OUTCOME_COL}'. "
+            f"Available oc columns: {list(oc.columns)}"
+        )
+    log_dataframe_columns("oc", oc)
 
-    oc_small = oc[["ts_id", OUTCOME_COL]].copy()
+    if OUTCOME_COL in latent_df.columns:
+        print(
+            f"[load_analysis_dataframe] Dropping '{OUTCOME_COL}' from latent tags "
+            "so the canonical outcome from oc is used."
+        )
+        latent_df = latent_df.drop(columns=[OUTCOME_COL])
+
+    oc_small = oc[["ts_id", OUTCOME_COL]].copy().drop_duplicates(subset=["ts_id"])
     oc_small["ts_id"] = oc_small["ts_id"].astype(str)
 
-    bg_df = build_background_features(ts)
+    bg_df = build_background_features(ts, dataset_model=current_model)
     bg_df["ts_id"] = bg_df["ts_id"].astype(str)
+    log_dataframe_columns("bg_df", bg_df)
+
+    latent_bg_overlap = [
+        column for column in bg_df.columns
+        if column != "ts_id" and column in latent_df.columns
+    ]
+    if latent_bg_overlap:
+        print(
+            "[load_analysis_dataframe] Dropping background columns from latent tags "
+            "so ts-derived background features remain canonical: "
+            f"{latent_bg_overlap}"
+        )
+        latent_df = latent_df.drop(columns=latent_bg_overlap)
 
     df = latent_df.merge(oc_small, on="ts_id", how="inner")
     df = df.merge(bg_df, on="ts_id", how="left")
+    df = normalize_expected_columns(
+        df,
+        [OUTCOME_COL, *BACKGROUND_FEATURE_COLUMNS, *TREATMENTS],
+        source_name="analysis_df",
+    )
 
+    rows_before_outcome_dropna = len(df)
+    df[OUTCOME_COL] = pd.to_numeric(df[OUTCOME_COL], errors="coerce")
     df = df.dropna(subset=[OUTCOME_COL]).copy()
     df[OUTCOME_COL] = df[OUTCOME_COL].astype(int)
+    print(
+        "[analysis_df] rows before dropping missing outcomes: "
+        f"{rows_before_outcome_dropna}"
+    )
+    log_dataframe_columns("analysis_df", df)
+    print(f"[analysis_df] shape: {df.shape}")
+    log_non_null_counts(
+        "analysis_df",
+        df,
+        ["ts_id", OUTCOME_COL, *TREATMENTS],
+    )
 
     return df
+
+
+def validate_analysis_dataframe(
+    df: pd.DataFrame,
+    treatments: List[str],
+    outcome_col: str,
+    model: str,
+) -> None:
+    outcome_exists = outcome_col in df.columns
+    outcome_all_nan = True
+    if outcome_exists:
+        outcome_all_nan = int(df[outcome_col].notna().sum()) == 0
+
+    missing_treatments = [
+        treatment for treatment in treatments
+        if treatment not in df.columns
+    ]
+    all_nan_treatments = [
+        treatment for treatment in treatments
+        if treatment in df.columns and int(df[treatment].notna().sum()) == 0
+    ]
+
+    if outcome_exists and not outcome_all_nan and not missing_treatments and not all_nan_treatments:
+        return
+
+    raise ValueError(
+        f"Invalid analysis dataframe for model={model}. "
+        f"Outcome column present: {outcome_exists}. "
+        f"Outcome all-NaN: {outcome_all_nan}. "
+        f"Missing treatment columns: {missing_treatments}. "
+        f"All-NaN treatment columns: {all_nan_treatments}. "
+        f"Shape: {df.shape}. "
+        f"Columns: {list(df.columns)}"
+    )
 
 
 def downsample_majority_label(
@@ -1593,12 +1789,32 @@ def fit_one_treatment(
     if treatment not in df.columns:
         raise ValueError(f"Treatment column '{treatment}' not found in dataframe")
 
-    # Keep only rows with observed treatment and outcome
-    work_df = df.dropna(subset=[treatment, OUTCOME_COL]).copy()
+    total_rows = int(len(df))
+    treatment_non_null = int(df[treatment].notna().sum())
+    outcome_non_null = int(df[OUTCOME_COL].notna().sum())
 
-    # Force binary integer encoding
+    work_df = df.copy()
     work_df[treatment] = pd.to_numeric(work_df[treatment], errors="coerce")
     work_df[OUTCOME_COL] = pd.to_numeric(work_df[OUTCOME_COL], errors="coerce")
+    rows_after_dropna = int(
+        work_df.dropna(subset=[treatment, OUTCOME_COL]).shape[0]
+    )
+
+    print(
+        f"[{treatment}] row counts before fit: total_rows={total_rows}, "
+        f"{treatment}_non_null={treatment_non_null}, "
+        f"{OUTCOME_COL}_non_null={outcome_non_null}, "
+        f"rows_after_dropna={rows_after_dropna}"
+    )
+    if rows_after_dropna == 0:
+        raise ValueError(
+            f"No rows remain for treatment {treatment} after dropping rows with "
+            f"missing treatment/outcome. total_rows={total_rows}, "
+            f"{treatment}_non_null={treatment_non_null}, "
+            f"{OUTCOME_COL}_non_null={outcome_non_null}, "
+            f"rows_after_dropna={rows_after_dropna}"
+        )
+
     work_df = work_df.dropna(subset=[treatment, OUTCOME_COL]).copy()
 
     work_df[treatment] = work_df[treatment].astype(int)
@@ -2135,7 +2351,17 @@ def main():
     log_environment_metadata(startup_env_metadata)
 
     print("Loading dataframe and graph...")
-    df = load_analysis_dataframe(LATENT_TAGS_PATH, PHYSIONET_PKL_PATH)
+    df = load_analysis_dataframe(
+        LATENT_TAGS_PATH,
+        PHYSIONET_PKL_PATH,
+        model=DATASET_MODEL,
+    )
+    validate_analysis_dataframe(
+        df=df,
+        treatments=TREATMENTS,
+        outcome_col=OUTCOME_COL,
+        model=DATASET_MODEL,
+    )
     G = load_graph(GRAPH_PKL_PATH)
 
     print(f"Loaded df shape: {df.shape}")
