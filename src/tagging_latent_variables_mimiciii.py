@@ -9,6 +9,7 @@ What this script does
 1. Loads either:
    - a pre-aggregated patient/ICU-stay summary CSV, or
    - raw concept-level CSVs/tables exported from MIMIC-III SQL queries.
+   - a PhysioNet-compatible MIMIC pickle: [ts, oc, ts_ids]
 2. Computes clinically motivated summary features.
 3. Applies pickle-safe rule-based decision trees for latent physiologic states.
 4. Saves:
@@ -163,6 +164,105 @@ ACUTE_ICD_KEYWORDS = [
 ]
 
 
+PICKLE_TS_SUMMARY_SPECS = {
+    "Age": {"aliases": ["Age"], "stats": {"first": "Age"}},
+    "Albumin": {"aliases": ["Albumin"], "stats": {"first": "Albumin_first"}},
+    "Lactate": {"aliases": ["Lactate"], "stats": {"max": "Lactate_max"}},
+    "pH": {"aliases": ["pH", "pH Blood"], "stats": {"min": "pH_min"}},
+    "Platelets": {"aliases": ["Platelets", "Platelet Count"], "stats": {"min": "Platelets_min"}},
+    "Creatinine": {
+        "aliases": ["Creatinine", "Creatinine Blood"],
+        "stats": {"first": "Creatinine_first", "max": "Creatinine_max"},
+    },
+    "Bilirubin": {"aliases": ["Bilirubin", "Bilirubin (Total)"], "stats": {"max": "Bilirubin_max"}},
+    "Temperature": {"aliases": ["Temperature"], "stats": {"min": "Temperature_min", "max": "Temperature_max"}},
+    "HR": {"aliases": ["HR"], "stats": {"max": "HR_max"}},
+    "RR": {"aliases": ["RR"], "stats": {"max": "RR_max"}},
+    "PaCO2": {"aliases": ["PaCO2", "PCO2"], "stats": {"min": "PaCO2_min", "max": "PaCO2_max"}},
+    "WBC": {"aliases": ["WBC"], "stats": {"min": "WBC_min", "max": "WBC_max"}},
+    "MAP": {"aliases": ["MAP", "MBP"], "stats": {"min": "MAP_min"}},
+    "SBP": {"aliases": ["SBP"], "stats": {"min": "SBP_min"}},
+    "PaO2": {"aliases": ["PaO2", "PO2"], "stats": {"min": "PaO2_min"}},
+    "FiO2": {"aliases": ["FiO2"], "stats": {"max": "FiO2_max"}},
+    "SpO2": {"aliases": ["SpO2", "O2 Saturation"], "stats": {"min": "SpO2_min"}},
+    "INR": {"aliases": ["INR"], "stats": {"max": "INR_max"}},
+    "TroponinT": {"aliases": ["TroponinT", "Troponin T"], "stats": {"max": "TroponinT_max"}},
+    "TroponinI": {"aliases": ["TroponinI", "Troponin I"], "stats": {"max": "TroponinI_max"}},
+    "Bicarbonate": {"aliases": ["Bicarbonate"], "stats": {"min": "Bicarbonate_min"}},
+    "AnionGap": {"aliases": ["AnionGap", "Anion Gap"], "stats": {"max": "AnionGap_max"}},
+    "Glucose": {
+        "aliases": ["Glucose", "Glucose (Blood)", "Glucose (Whole Blood)", "Glucose (Serum)"],
+        "stats": {"min": "Glucose_min", "max": "Glucose_max"},
+    },
+    "AST": {"aliases": ["AST"], "stats": {"max": "AST_max"}},
+    "ALT": {"aliases": ["ALT"], "stats": {"max": "ALT_max"}},
+}
+
+PICKLE_GCS_COMPONENTS = ["GCS_eye", "GCS_motor", "GCS_verbal"]
+PICKLE_URINE_VARIABLE = "Urine"
+PICKLE_WEIGHT_VARIABLE = "Weight"
+PICKLE_TS_BINARY_HELPERS = {
+    "MechanicalVentilation_any": ["MechanicalVentilation", "Intubated"],
+    "Vasopressors_any": ["Vasopressin", "Norepinephrine", "Epinephrine", "Dopamine", "Neosynephrine"],
+}
+PICKLE_OC_OPTIONAL_FIELDS = {
+    "InHospitalMortality": ["InHospitalMortality", "in_hospital_mortality"],
+    "AdmissionType": ["AdmissionType", "admission_type", "ADMISSION_TYPE"],
+    "ChronicICD_any": ["ChronicICD_any"],
+    "AcuteICD_any": ["AcuteICD_any"],
+    "SuspectedInfection_any": ["SuspectedInfection_any"],
+    "TroponinPositive_any": ["TroponinPositive_any"],
+}
+PICKLE_EXPECTED_SUMMARY_COLUMNS = [
+    "Age",
+    "Albumin_first",
+    "AdmissionType",
+    "ChronicICD_any",
+    "AcuteICD_any",
+    "MechanicalVentilation_any",
+    "Vasopressors_any",
+    "Lactate_max",
+    "pH_min",
+    "GCS_min",
+    "Platelets_min",
+    "Creatinine_first",
+    "Creatinine_max",
+    "Bilirubin_max",
+    "Temperature_min",
+    "Temperature_max",
+    "HR_max",
+    "RR_max",
+    "PaCO2_min",
+    "PaCO2_max",
+    "WBC_min",
+    "WBC_max",
+    "SIRS_count_max",
+    "MAP_min",
+    "SBP_min",
+    "UrineOutput_sum_24h",
+    "UrineOutput_mlkg_6h_min",
+    "PaO2_min",
+    "FiO2_max",
+    "PF_ratio_min",
+    "SF_ratio_min",
+    "SpO2_min",
+    "Creatinine_delta",
+    "Creatinine_ratio",
+    "INR_max",
+    "TroponinPositive_any",
+    "TroponinT_max",
+    "TroponinI_max",
+    "Bicarbonate_min",
+    "AnionGap_max",
+    "Glucose_min",
+    "Glucose_max",
+    "AST_max",
+    "ALT_max",
+    "SuspectedInfection_any",
+    "InHospitalMortality",
+]
+
+
 # ============================================================
 # Utilities
 # ============================================================
@@ -254,6 +354,12 @@ def standard_stats(series: pd.Series) -> Dict[str, float]:
         "first": s.iloc[0],
         "last": s.iloc[-1],
     }
+
+
+def require_columns(df: pd.DataFrame, required_columns: Iterable[str], df_name: str) -> None:
+    missing = [column for column in required_columns if column not in df.columns]
+    if missing:
+        raise ValueError(f"{df_name} is missing required columns: {missing}")
 
 
 # ============================================================
@@ -454,6 +560,241 @@ def load_raw_concept_tables(args) -> RawConceptTables:
         cultures_antibiotics=maybe_read_csv(args.infection_csv),
         troponin_map=maybe_read_csv(args.troponin_map_csv),
     )
+
+
+def load_mimic_pickle_payload(pkl_path: str) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
+    with open(pkl_path, "rb") as f:
+        payload = pickle.load(f)
+
+    if not isinstance(payload, (list, tuple)) or len(payload) != 3:
+        raise ValueError(
+            "Expected pickle payload [ts, oc, ts_ids]; got an object with a different structure."
+        )
+
+    ts, oc, ts_ids = payload
+    if not isinstance(ts, pd.DataFrame) or not isinstance(oc, pd.DataFrame):
+        raise ValueError("Pickle payload must contain pandas DataFrames for ts and oc.")
+    if not isinstance(ts_ids, (list, tuple)):
+        raise ValueError("Pickle payload must contain ts_ids as a list or tuple.")
+
+    require_columns(ts, ["ts_id", "minute", "variable", "value"], "ts")
+    require_columns(oc, ["ts_id"], "oc")
+
+    ts = ts.loc[:, ["ts_id", "minute", "variable", "value"]].copy()
+    ts["ts_id"] = ts["ts_id"].astype(str)
+    ts["minute"] = pd.to_numeric(ts["minute"], errors="raise").astype(int)
+    ts["variable"] = ts["variable"].astype(str)
+    ts["value"] = pd.to_numeric(ts["value"], errors="coerce")
+    ts = ts.sort_values(["ts_id", "minute", "variable"]).reset_index(drop=True)
+
+    oc = oc.copy()
+    oc["ts_id"] = oc["ts_id"].astype(str)
+
+    ts_ids = [str(ts_id) for ts_id in ts_ids]
+    if ts_ids != sorted(ts_ids):
+        raise ValueError("ts_ids in the pickle must be sorted.")
+
+    ts_ids_from_ts = sorted(ts["ts_id"].unique().tolist())
+    if ts_ids != ts_ids_from_ts:
+        raise ValueError("ts_ids in the pickle must match sorted(ts.ts_id.unique()).")
+
+    oc_ids = set(oc["ts_id"].astype(str))
+    if not oc_ids.issubset(set(ts_ids)):
+        raise ValueError("All oc.ts_id values must be contained in ts_ids.")
+
+    return ts, oc, ts_ids
+
+
+def _aggregate_minimal_summary_stats_from_ts(ts: pd.DataFrame) -> pd.DataFrame:
+    alias_to_target = {}
+    for target_name, spec in PICKLE_TS_SUMMARY_SPECS.items():
+        for alias in spec["aliases"]:
+            alias_to_target[alias] = target_name
+
+    work = ts.loc[ts["variable"].isin(alias_to_target), ["ts_id", "minute", "variable", "value"]].copy()
+    if work.empty:
+        return pd.DataFrame(columns=["icustay_id"])
+
+    work["target_name"] = work["variable"].map(alias_to_target)
+    rows = []
+    for stay_id, g_stay in work.groupby("ts_id", sort=False):
+        row = {"icustay_id": stay_id}
+        for target_name, g_var in g_stay.groupby("target_name", sort=False):
+            stats = standard_stats(g_var.sort_values("minute")["value"])
+            for stat_name, out_col in PICKLE_TS_SUMMARY_SPECS[target_name]["stats"].items():
+                row[out_col] = stats[stat_name]
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def _aggregate_gcs_min_from_ts(ts: pd.DataFrame) -> pd.DataFrame:
+    available_variables = set(ts["variable"].unique())
+    missing_components = [col for col in PICKLE_GCS_COMPONENTS if col not in available_variables]
+    if missing_components:
+        raise ValueError(
+            "Pickle mode requires GCS_eye, GCS_motor, and GCS_verbal in ts to build GCS_min. "
+            f"Missing: {missing_components}"
+        )
+
+    gcs = ts.loc[ts["variable"].isin(PICKLE_GCS_COMPONENTS), ["ts_id", "minute", "variable", "value"]].copy()
+    if gcs.empty:
+        raise ValueError("Pickle mode could not find any GCS component rows in ts.")
+
+    gcs_wide = gcs.pivot_table(
+        index=["ts_id", "minute"],
+        columns="variable",
+        values="value",
+        aggfunc="mean",
+    )
+    gcs_wide = gcs_wide.dropna(subset=PICKLE_GCS_COMPONENTS)
+    if gcs_wide.empty:
+        return pd.DataFrame(columns=["icustay_id", "GCS_min"])
+
+    gcs_wide["GCS_total"] = (
+        gcs_wide["GCS_eye"] + gcs_wide["GCS_motor"] + gcs_wide["GCS_verbal"]
+    )
+    out = (
+        gcs_wide.reset_index()
+        .groupby("ts_id", as_index=False)["GCS_total"]
+        .min()
+        .rename(columns={"ts_id": "icustay_id", "GCS_total": "GCS_min"})
+    )
+    return out
+
+
+def _get_first_weight_by_stay(ts: pd.DataFrame) -> pd.Series:
+    weights = ts.loc[ts["variable"] == PICKLE_WEIGHT_VARIABLE, ["ts_id", "minute", "value"]].copy()
+    if weights.empty:
+        return pd.Series(dtype=float)
+
+    weights = weights.dropna(subset=["value"]).sort_values(["ts_id", "minute"])
+    if weights.empty:
+        return pd.Series(dtype=float)
+
+    return weights.groupby("ts_id")["value"].first()
+
+
+def _aggregate_urine_from_ts(ts: pd.DataFrame) -> pd.DataFrame:
+    urine = ts.loc[ts["variable"] == PICKLE_URINE_VARIABLE, ["ts_id", "minute", "value"]].copy()
+    if urine.empty:
+        return pd.DataFrame(columns=["icustay_id", "UrineOutput_sum_24h", "UrineOutput_mlkg_6h_min"])
+
+    urine = urine.dropna(subset=["minute", "value"]).sort_values(["ts_id", "minute"])
+    if urine.empty:
+        return pd.DataFrame(columns=["icustay_id", "UrineOutput_sum_24h", "UrineOutput_mlkg_6h_min"])
+
+    first_weight = _get_first_weight_by_stay(ts)
+    rows = []
+    for stay_id, g in urine.groupby("ts_id", sort=False):
+        row = {"icustay_id": stay_id}
+
+        first_day = g.loc[(g["minute"] >= 0) & (g["minute"] <= 24 * 60), "value"].dropna()
+        row["UrineOutput_sum_24h"] = float(first_day.sum()) if len(first_day) else np.nan
+
+        weight = first_weight.get(stay_id, np.nan)
+        if is_notna(weight) and weight > 0:
+            minutes = g["minute"].to_numpy(dtype=float)
+            values = g["value"].to_numpy(dtype=float)
+            cumsum = np.cumsum(values)
+            window_starts = np.searchsorted(minutes, minutes - 360, side="left")
+            window_sums = cumsum.copy()
+            mask = window_starts > 0
+            window_sums[mask] = window_sums[mask] - cumsum[window_starts[mask] - 1]
+            urine_rates = window_sums / weight / 6.0
+            row["UrineOutput_mlkg_6h_min"] = float(np.nanmin(urine_rates)) if len(urine_rates) else np.nan
+        else:
+            row["UrineOutput_mlkg_6h_min"] = np.nan
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def _aggregate_binary_any_from_ts(
+    ts: pd.DataFrame,
+    source_variables: Iterable[str],
+    out_name: str,
+) -> Tuple[pd.DataFrame, bool]:
+    source_variables = [var for var in source_variables if var in set(ts["variable"].unique())]
+    if not source_variables:
+        return pd.DataFrame(columns=["icustay_id", out_name]), False
+
+    work = ts.loc[ts["variable"].isin(source_variables), ["ts_id", "value"]].copy()
+    if work.empty:
+        return pd.DataFrame(columns=["icustay_id", out_name]), True
+
+    work[out_name] = (work["value"].fillna(0) > 0).astype(int)
+    out = (
+        work.groupby("ts_id", as_index=False)[out_name]
+        .max()
+        .rename(columns={"ts_id": "icustay_id"})
+    )
+    return out, True
+
+
+def _merge_optional_oc_fields(summary_df: pd.DataFrame, oc: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {}
+    for out_col, aliases in PICKLE_OC_OPTIONAL_FIELDS.items():
+        for alias in aliases:
+            if alias in oc.columns:
+                rename_map[alias] = out_col
+                break
+
+    if not rename_map:
+        return summary_df
+
+    oc_small = oc.loc[:, ["ts_id", *rename_map.keys()]].copy()
+    oc_small = oc_small.rename(columns={"ts_id": "icustay_id", **rename_map})
+    if "InHospitalMortality" in oc_small.columns:
+        oc_small["InHospitalMortality"] = pd.to_numeric(
+            oc_small["InHospitalMortality"], errors="coerce"
+        )
+
+    oc_small = oc_small.drop_duplicates(subset=["icustay_id"])
+    return summary_df.merge(oc_small, on="icustay_id", how="left")
+
+
+def build_summary_df_from_ts_oc(
+    ts: pd.DataFrame,
+    oc: pd.DataFrame,
+    ts_ids: List[str],
+) -> pd.DataFrame:
+    summary = pd.DataFrame({"icustay_id": [str(ts_id) for ts_id in ts_ids]})
+
+    summary = summary.merge(_aggregate_minimal_summary_stats_from_ts(ts), on="icustay_id", how="left")
+    summary = summary.merge(_aggregate_gcs_min_from_ts(ts), on="icustay_id", how="left")
+    summary = summary.merge(_aggregate_urine_from_ts(ts), on="icustay_id", how="left")
+    summary = _merge_optional_oc_fields(summary, oc)
+
+    for out_name, source_variables in PICKLE_TS_BINARY_HELPERS.items():
+        helper_df, available = _aggregate_binary_any_from_ts(ts, source_variables, out_name)
+        if available:
+            summary = summary.merge(helper_df, on="icustay_id", how="left")
+        elif out_name not in summary.columns:
+            summary[out_name] = np.nan
+
+    summary = _compute_sirs_features(summary)
+    sirs_inputs = [
+        "Temperature_min", "Temperature_max", "HR_max", "RR_max", "PaCO2_min", "WBC_min", "WBC_max"
+    ]
+    sirs_available = [col for col in sirs_inputs if col in summary.columns]
+    if sirs_available:
+        missing_all_sirs_inputs = summary[sirs_available].isna().all(axis=1)
+        summary.loc[missing_all_sirs_inputs, "SIRS_count_max"] = np.nan
+
+    summary = _compute_derived_features(summary)
+
+    for col in PICKLE_EXPECTED_SUMMARY_COLUMNS:
+        if col not in summary.columns:
+            summary[col] = np.nan
+
+    return summary
+
+
+def load_summary_from_mimic_pickle(pkl_path: str) -> pd.DataFrame:
+    ts, oc, ts_ids = load_mimic_pickle_payload(pkl_path)
+    return build_summary_df_from_ts_oc(ts, oc, ts_ids)
 
 
 # ============================================================
@@ -985,6 +1326,8 @@ def parse_args():
     # Input modes
     p.add_argument("--summary_csv", type=str, default=None,
                    help="Pre-aggregated summary CSV with one row per ICU stay.")
+    p.add_argument("--pkl_path", type=str, default=None,
+                   help="PhysioNet-compatible MIMIC pickle storing [ts, oc, ts_ids].")
 
     # Raw concept CSVs
     p.add_argument("--admissions_csv", type=str, default=None)
@@ -1008,6 +1351,7 @@ def main():
     ensure_dir(args.output_dir)
 
     summary_mode = args.summary_csv is not None
+    pkl_mode = args.pkl_path is not None
     raw_mode = any([
         args.admissions_csv,
         args.diagnoses_csv,
@@ -1020,15 +1364,20 @@ def main():
         args.troponin_map_csv,
     ])
 
-    if not summary_mode and not raw_mode:
+    num_modes = int(summary_mode) + int(pkl_mode) + int(raw_mode)
+    if num_modes != 1:
         raise ValueError(
-            "Provide either --summary_csv OR raw concept CSV inputs "
-            "(at minimum admissions_csv for raw mode)."
+            "Provide exactly one input mode: --summary_csv, --pkl_path, "
+            "or raw concept CSV inputs (at minimum --admissions_csv for raw mode)."
         )
 
     if summary_mode:
         print("[1/5] Loading summary CSV...")
         summary_df = load_summary_csv(args.summary_csv)
+    elif pkl_mode:
+        print("[1/5] Loading MIMIC pickle...")
+        print("[2/5] Building summary dataframe from canonical ts/oc...")
+        summary_df = load_summary_from_mimic_pickle(args.pkl_path)
     else:
         print("[1/5] Loading raw concept CSVs...")
         raw = load_raw_concept_tables(args)
