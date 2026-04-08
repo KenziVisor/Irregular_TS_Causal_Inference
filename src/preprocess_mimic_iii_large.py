@@ -12,7 +12,7 @@ from preprocess_mimic_iii_large_contract import (
 )
 
 
-RAW_DATA_PATH = 'mimiciii'
+RAW_DATA_PATH = '../mimiciii'
 OUTPUT_PATH = '../data/processed/mimic_iii_ts_oc_ids.pkl'
 
 # Get all ICU stays.

@@ -189,7 +189,7 @@ def create_mimiciii_causal_graph(save=0) -> nx.DiGraph:
         raise ValueError("Constructed graph is not a DAG")
 
     if save:
-        with open("/mnt/data/mimiciii_causal_graph.pkl", "wb") as f:
+        with open("../data/mimiciii_causal_graph.pkl", "wb") as f:
             pickle.dump(G, f)
 
     return G
@@ -273,7 +273,7 @@ def draw_graph(
     plt.tight_layout()
 
     if save:
-        plt.savefig("/mnt/data/mimiciii_causal_dag.png", dpi=220, bbox_inches="tight")
+        plt.savefig("../data/mimiciii_causal_dag.png", dpi=220, bbox_inches="tight")
     else:
         plt.show()
 
