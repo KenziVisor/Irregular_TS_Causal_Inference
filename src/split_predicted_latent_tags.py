@@ -41,7 +41,8 @@ def split_predicted_latent_tags(
     input_csv: Path,
     prob_output: Path,
     tag_output: Path,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], int]:
+    print(f"[2/4] Reading combined latent CSV from: {input_csv.resolve()}")
     with input_csv.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.reader(handle)
         try:
@@ -68,6 +69,7 @@ def split_predicted_latent_tags(
 
         prob_rows: list[list[str]] = []
         tag_rows: list[list[str]] = []
+        processed_rows = 0
 
         for row_number, row in enumerate(reader, start=2):
             if len(row) != len(header):
@@ -79,11 +81,18 @@ def split_predicted_latent_tags(
             values = row[1:]
             prob_rows.append([ts_id, *values[:midpoint]])
             tag_rows.append([ts_id, *values[midpoint:]])
+            processed_rows += 1
+            if processed_rows % 50000 == 0:
+                print(f"      Processed {processed_rows:,} data rows")
 
+    print(
+        f"[3/4] Writing split outputs ({processed_rows:,} rows | "
+        f"{len(prob_columns)} probability columns | {len(tag_columns)} tag columns)"
+    )
     write_csv(prob_output, ["ts_id", *prob_columns], prob_rows)
     write_csv(tag_output, ["ts_id", *tag_columns], tag_rows)
 
-    return prob_columns, tag_columns
+    return prob_columns, tag_columns, processed_rows
 
 
 def main() -> None:
@@ -99,15 +108,19 @@ def main() -> None:
     if not input_csv.exists():
         raise FileNotFoundError(f"Input CSV not found: {input_csv}")
 
+    print("=== Splitting predicted latent tags ===")
+    print(f"[1/4] Runtime configuration: model={args.model} | input={input_csv.resolve()}")
     prob_output, tag_output = default_output_paths(input_csv)
-    prob_columns, tag_columns = split_predicted_latent_tags(
+    prob_columns, tag_columns, row_count = split_predicted_latent_tags(
         input_csv=input_csv,
         prob_output=prob_output,
         tag_output=tag_output,
     )
 
+    print("[4/4] Finished writing split CSV files")
     print(f"Saved probabilities table to: {prob_output}")
     print(f"Saved absolute tags table to: {tag_output}")
+    print(f"Rows processed: {row_count:,}")
     print(f"Probability columns: {len(prob_columns)}")
     print(f"Absolute tag columns: {len(tag_columns)}")
 

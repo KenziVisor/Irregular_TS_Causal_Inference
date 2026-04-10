@@ -106,11 +106,15 @@ def split_by_T(
 
 
 # Load Data.
+print("=== Running treatment split examples ===")
+print(f"[1/4] Loading processed PhysioNet pickle from: {filepath}")
 with open(filepath, 'rb') as file:
     ts, oc, ts_ids = pickle.load(file)
+print(f"      Loaded ts rows={len(ts):,}, oc rows={len(oc):,}, patients={len(ts_ids):,}")
 
 # Generate split.
 # T=1 if avg(HR) in first 6 hours >= 90
+print("[2/4] Split by average HR in first 6 hours >= 90")
 t1, t0 = split_by_T(
     ts, ts_ids,
     mode="avg_value",
@@ -119,9 +123,10 @@ t1, t0 = split_by_T(
     start_minute=0,
     end_minute=360
 )
-print([len(elem) for elem in [t1, t0]])
+print(f"      Result: T=1 -> {len(t1):,} patients | T=0 -> {len(t0):,} patients")
 
 # T=1 if avg time between HR measurements in first day <= 60 minutes
+print("[3/4] Split by average HR measurement spacing in first 24 hours <= 60 minutes")
 t1, t0 = split_by_T(
     ts, ts_ids,
     mode="time_spacing",
@@ -130,9 +135,10 @@ t1, t0 = split_by_T(
     start_minute=0,
     end_minute=1440
 )
-print([len(elem) for elem in [t1, t0]])
+print(f"      Result: T=1 -> {len(t1):,} patients | T=0 -> {len(t0):,} patients")
 
 # Both together (AND)
+print("[4/4] Split by both HR average and spacing rules together")
 t1, t0 = split_by_T(
     ts, ts_ids,
     mode="both",
@@ -142,4 +148,5 @@ t1, t0 = split_by_T(
     start_minute=0,
     end_minute=1440
 )
-print([len(elem) for elem in [t1, t0]])
+print(f"      Result: T=1 -> {len(t1):,} patients | T=0 -> {len(t0):,} patients")
+print("Treatment split examples completed.")

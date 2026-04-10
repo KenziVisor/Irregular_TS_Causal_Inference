@@ -9,6 +9,7 @@ from typing import Dict, List, Set, Tuple
 import networkx as nx
 import numpy as np
 import pandas as pd
+from preprocess_mimic_iii_large_contract import canonicalize_stay_id_series
 
 
 # ============================================================
@@ -176,6 +177,7 @@ def load_analysis_dataframe(
     latent_tags_path: str,
     physionet_pkl_path: str,
 ) -> pd.DataFrame:
+    print(f"[load_analysis_dataframe] Loading latent tags from: {latent_tags_path}")
     latent_df = pd.read_csv(latent_tags_path)
     if "ts_id" in latent_df.columns:
         latent_df = latent_df.copy()
@@ -186,9 +188,20 @@ def load_analysis_dataframe(
             "Latent tags CSV must contain 'ts_id', or contain 'icustay_id' when "
             f"--model mimic is used. Source: {latent_tags_path}"
         )
-    latent_df["ts_id"] = latent_df["ts_id"].astype(str)
+    latent_df["ts_id"] = canonicalize_stay_id_series(latent_df["ts_id"])
+    if latent_df["ts_id"].isna().any():
+        raise ValueError("Latent tags contain missing ts_id values after canonicalization.")
 
+    print(f"[load_analysis_dataframe] Loading processed pickle from: {physionet_pkl_path}")
     ts, oc, _ = load_physionet_pickle(physionet_pkl_path)
+    ts = ts.copy()
+    ts["ts_id"] = canonicalize_stay_id_series(ts["ts_id"])
+    if ts["ts_id"].isna().any():
+        raise ValueError("Processed pickle ts contains missing ts_id values after canonicalization.")
+    oc = oc.copy()
+    oc["ts_id"] = canonicalize_stay_id_series(oc["ts_id"])
+    if oc["ts_id"].isna().any():
+        raise ValueError("Processed pickle oc contains missing ts_id values after canonicalization.")
     if OUTCOME_COL not in oc.columns:
         raise ValueError(
             f"Processed pickle is missing outcome column '{OUTCOME_COL}'. "
@@ -199,10 +212,14 @@ def load_analysis_dataframe(
         latent_df = latent_df.drop(columns=[OUTCOME_COL])
 
     oc_small = oc[["ts_id", OUTCOME_COL]].copy().drop_duplicates(subset=["ts_id"])
-    oc_small["ts_id"] = oc_small["ts_id"].astype(str)
+    oc_small["ts_id"] = canonicalize_stay_id_series(oc_small["ts_id"])
+    if oc_small["ts_id"].isna().any():
+        raise ValueError("Processed pickle oc_small contains missing ts_id values after canonicalization.")
 
     bg_df = build_background_features(ts, dataset_model=DATASET_MODEL)
-    bg_df["ts_id"] = bg_df["ts_id"].astype(str)
+    bg_df["ts_id"] = canonicalize_stay_id_series(bg_df["ts_id"])
+    if bg_df["ts_id"].isna().any():
+        raise ValueError("Background features contain missing ts_id values after canonicalization.")
 
     latent_bg_overlap = [
         column for column in bg_df.columns
@@ -211,11 +228,28 @@ def load_analysis_dataframe(
     if latent_bg_overlap:
         latent_df = latent_df.drop(columns=latent_bg_overlap)
 
+    overlapping_ids = set(latent_df["ts_id"].dropna().tolist()) & set(oc_small["ts_id"].dropna().tolist())
+    if oc_small.empty or not overlapping_ids:
+        if DATASET_MODEL == "mimic":
+            raise ValueError(
+                "Processed MIMIC pickle and latent tags are misaligned: there are no "
+                "overlapping ts_id values between latent tags and oc. A known cause is "
+                "float-style stay identifiers such as '12345.0' versus '12345'."
+            )
+        raise ValueError(
+            "Processed pickle and latent tags are misaligned: there are no overlapping "
+            "ts_id values between latent tags and oc."
+        )
+
     df = latent_df.merge(oc_small, on="ts_id", how="inner")
     df = df.merge(bg_df, on="ts_id", how="left")
 
     df = df.dropna(subset=[OUTCOME_COL]).copy()
     df[OUTCOME_COL] = df[OUTCOME_COL].astype(int)
+    print(
+        f"[load_analysis_dataframe] Built analysis dataframe: shape={df.shape} | "
+        f"outcome_rate={df[OUTCOME_COL].mean():.4f}"
+    )
 
     return df
 
@@ -712,6 +746,10 @@ def greedy_hamming_match(
     pairs_by_distance: Dict[int, int] = {}
 
     for allowed_dist in range(max_dist + 1):
+        print(
+            f"      Matching round: allowed_distance<={allowed_dist} | "
+            f"current_pairs={len(all_pairs):,}"
+        )
         new_pairs_this_round = 0
 
         already_matched_treated = {p["treated_row_idx"] for p in all_pairs}
@@ -759,6 +797,10 @@ def greedy_hamming_match(
                 used_control.add(j)
 
         pairs_by_distance[allowed_dist] = new_pairs_this_round
+        print(
+            f"      Completed distance<={allowed_dist}: added {new_pairs_this_round:,} "
+            f"pairs | total_pairs={len(all_pairs):,}"
+        )
 
         if sufficient_matches(len(all_pairs), len(treated)):
             break
@@ -996,13 +1038,20 @@ def main():
         must_exist=False,
     )
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    print("Loading dataframe and graph...")
+    print("=== Starting matched-pair causal effect run ===")
+    print(
+        "Runtime configuration: "
+        f"model={DATASET_MODEL} | latent_tags_path={LATENT_TAGS_PATH} | "
+        f"processed_pkl_path={PHYSIONET_PKL_PATH} | graph_pkl_path={GRAPH_PKL_PATH} | "
+        f"output_dir={OUTPUT_DIR}"
+    )
+    print("[1/3] Loading dataframe and graph...")
     df = load_analysis_dataframe(LATENT_TAGS_PATH, PHYSIONET_PKL_PATH)
     G = load_graph(GRAPH_PKL_PATH)
 
     print(f"Loaded df shape: {df.shape}")
     print(f"Outcome rate before down-sampling: {df[OUTCOME_COL].mean():.4f}")
+    print(f"DAG size: nodes={G.number_of_nodes()} | edges={G.number_of_edges()}")
 
     if DOWN_SAMPLE:
         df = downsample_majority_label(
@@ -1015,10 +1064,11 @@ def main():
     else:
         print(f"Outcome rate: {df[OUTCOME_COL].mean():.4f}")
 
+    print(f"[2/3] Starting treatment loop: {len(TREATMENTS)} treatments total")
     global_rows = []
 
-    for treatment in TREATMENTS:
-        print(f"\n=== Treatment: {treatment} ===")
+    for treatment_index, treatment in enumerate(TREATMENTS, start=1):
+        print(f"\n=== Treatment {treatment_index}/{len(TREATMENTS)}: {treatment} ===")
 
         if treatment not in df.columns:
             print(f"Skipping {treatment}: not found in dataframe")
@@ -1036,6 +1086,10 @@ def main():
         )
 
         confounders = confounder_info["observed_confounders"]
+        print(
+            f"[{treatment}] Confounder discovery finished: "
+            f"observed_confounders={len(confounders)}"
+        )
 
         treatment_dir = os.path.join(OUTPUT_DIR, treatment)
         os.makedirs(treatment_dir, exist_ok=True)
@@ -1051,6 +1105,7 @@ def main():
             print(f"[{treatment}] treatment rate: {work_df[treatment].mean():.4f}")
             print(f"[{treatment}] outcome rate: {work_df[OUTCOME_COL].mean():.4f}")
 
+            print(f"[{treatment}] Building binary matching matrix")
             match_design_df, transform_info = to_binary_matching_matrix(work_df, confounders)
             conf_bin_cols = list(match_design_df.columns)
 
@@ -1066,6 +1121,10 @@ def main():
 
             treated_df = work_df[work_df[treatment] == 1].copy().reset_index(drop=True)
             control_df = work_df[work_df[treatment] == 0].copy().reset_index(drop=True)
+            print(
+                f"[{treatment}] Starting greedy Hamming matching | treated={len(treated_df):,} | "
+                f"control={len(control_df):,} | binary_columns={len(conf_bin_cols)}"
+            )
 
             pairs_df, matching_info = greedy_hamming_match(
                 treated_df=treated_df,
@@ -1092,6 +1151,7 @@ def main():
                 conf_bin_cols=conf_bin_cols,
                 matching_info=matching_info,
             )
+            print(f"[{treatment}] Matching complete. Next: writing outputs")
 
             pairs_df.to_csv(pairs_csv, index=False)
 
@@ -1137,6 +1197,10 @@ def main():
         global_df = global_df.sort_values(by="mean_pair_effect", ascending=False)
         global_df.to_csv(global_summary_csv, index=False)
         print(f"\nSaved global summary: {global_summary_csv}")
+    print(
+        f"[3/3] Matching run finished. Successful treatment summaries: "
+        f"{len(global_rows)} / {len(TREATMENTS)}"
+    )
 
 
 if __name__ == "__main__":

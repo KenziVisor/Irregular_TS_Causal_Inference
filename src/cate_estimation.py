@@ -53,8 +53,8 @@ MODEL_TYPE = "CausalForest"   # LinearDML or CausalForest
 DEFAULT_SENSITIVITY_ALPHA = 0.05
 ARTIFACT_SCHEMA_VERSION = 3
 ESTIMATOR_STACK_DEVICE_NOTE = (
-    "CUDA is available, but the current EconML/scikit-learn estimator stack "
-    "remains CPU-bound here; the selected device is logged for provenance only."
+    "Running on CPU (EconML/scikit-learn estimators are CPU-based here); "
+    "CUDA availability is recorded for provenance only."
 )
 
 
@@ -215,45 +215,38 @@ def detect_runtime_device() -> Dict[str, object]:
     info: Dict[str, object] = {
         "runtime_device_selected": "cpu",
         "torch_cuda_available": False,
-        "torch_cuda_device_count": 0,
+        "torch_cuda_device_count": None,
         "torch_cuda_device_name": None,
-        "runtime_device_note": "CUDA is unavailable; using CPU.",
+        "runtime_device_note": "Running on CPU (CUDA unavailable).",
     }
 
     try:
         import torch
     except Exception as exc:
         info["runtime_device_note"] = (
-            f"PyTorch import failed; using CPU. Detail: {type(exc).__name__}: {exc}"
-        )
-        return info
-
-    try:
-        cuda_available = bool(torch.cuda.is_available())
-    except Exception as exc:
-        info["runtime_device_note"] = (
-            "torch.cuda.is_available() failed; using CPU. "
+            "PyTorch import failed; running on CPU. "
             f"Detail: {type(exc).__name__}: {exc}"
         )
         return info
 
-    info["torch_cuda_available"] = cuda_available
-    if not cuda_available:
+    try:
+        info["torch_cuda_available"] = bool(torch.cuda.is_available())
+    except Exception as exc:
+        info["runtime_device_note"] = (
+            "torch.cuda.is_available() failed; running on CPU. "
+            f"Detail: {type(exc).__name__}: {exc}"
+        )
         return info
 
-    info["runtime_device_selected"] = "cuda"
+    if not info["torch_cuda_available"]:
+        return info
+
     info["runtime_device_note"] = ESTIMATOR_STACK_DEVICE_NOTE
 
     try:
         info["torch_cuda_device_count"] = int(torch.cuda.device_count())
     except Exception:
         info["torch_cuda_device_count"] = None
-
-    try:
-        current_device = torch.cuda.current_device()
-        info["torch_cuda_device_name"] = torch.cuda.get_device_name(current_device)
-    except Exception:
-        info["torch_cuda_device_name"] = None
 
     return info
 
@@ -1874,6 +1867,10 @@ def fit_one_treatment(
     # Keep only columns that actually exist
     confounders = [c for c in confounders if c in work_df.columns and c not in [treatment, OUTCOME_COL]]
     effect_modifiers = [c for c in effect_modifiers if c in work_df.columns and c not in [treatment, OUTCOME_COL]]
+    print(
+        f"[{treatment}] selected variables: confounders={len(confounders)} | "
+        f"effect_modifiers={len(effect_modifiers)}"
+    )
 
     used_cols = ["ts_id", treatment, OUTCOME_COL] + confounders + effect_modifiers
     used_cols = list(dict.fromkeys(used_cols))
@@ -1921,6 +1918,10 @@ def fit_one_treatment(
         f"[{treatment}] estimator method availability before fit: "
         f"{format_estimator_method_availability(pre_fit_availability)}"
     )
+    print(
+        f"[{treatment}] Starting estimator fit | n={len(model_df):,} | "
+        f"W_shape={None if W is None else W.shape} | X_shape={None if X is None else X.shape}"
+    )
 
     est.fit(Y=Y, T=T, X=X, W=W, cache_values=True)
     post_fit_availability = collect_estimator_method_availability(est)
@@ -1929,6 +1930,7 @@ def fit_one_treatment(
         f"{format_estimator_method_availability(post_fit_availability)}"
     )
     cate = est.effect(X=X)
+    print(f"[{treatment}] Generated CATE estimates for {len(cate):,} rows")
 
     out = model_df[["ts_id", treatment, OUTCOME_COL]].copy()
     out["CATE"] = cate
@@ -2406,7 +2408,8 @@ def main():
     )
     log_environment_metadata(startup_env_metadata)
 
-    print("Loading dataframe and graph...")
+    print("=== Starting CATE estimation run ===")
+    print("[1/3] Loading dataframe and graph...")
     df = load_analysis_dataframe(
         LATENT_TAGS_PATH,
         PHYSIONET_PKL_PATH,
@@ -2422,6 +2425,7 @@ def main():
 
     print(f"Loaded df shape: {df.shape}")
     print(f"Outcome rate before down-sampling: {df[OUTCOME_COL].mean():.4f}")
+    print(f"DAG size: nodes={G.number_of_nodes()} | edges={G.number_of_edges()}")
 
     print(f"Output directory: {OUTPUT_DIR}")
     print(f"Down-sample: {DOWN_SAMPLE}")
@@ -2439,10 +2443,11 @@ def main():
     else:
         print(f"Outcome rate: {df[OUTCOME_COL].mean():.4f}")
 
+    print(f"[2/3] Starting treatment loop: {len(TREATMENTS)} treatments total")
     global_summary_rows = []
 
-    for treatment in TREATMENTS:
-        print(f"\n=== Treatment: {treatment} ===")
+    for treatment_index, treatment in enumerate(TREATMENTS, start=1):
+        print(f"\n=== Treatment {treatment_index}/{len(TREATMENTS)}: {treatment} ===")
 
         if treatment not in df.columns:
             print(f"Skipping {treatment}: not found in dataframe")
@@ -2461,6 +2466,10 @@ def main():
 
         confounders = confounder_info["observed_confounders"]
         effect_modifiers = choose_effect_modifiers(df, treatment, confounders)
+        print(
+            f"[{treatment}] Confounder discovery finished: observed={len(confounders)} | "
+            f"effect_modifiers={len(effect_modifiers)}"
+        )
 
         treatment_dir = os.path.join(OUTPUT_DIR, treatment)
         os.makedirs(treatment_dir, exist_ok=True)
@@ -2499,6 +2508,7 @@ def main():
         )
 
         try:
+            print(f"[{treatment}] Starting model fit")
             est, cate_df, summary, formula, model_artifact = fit_one_treatment(
                 df=df,
                 treatment=treatment,
@@ -2536,6 +2546,7 @@ def main():
                 except Exception:
                     pass
 
+            print(f"[{treatment}] Writing per-treatment outputs")
             cate_df.to_csv(cate_csv, index=False)
             save_model_artifact(model_pkl, model_artifact)
 
@@ -2661,10 +2672,10 @@ def main():
             print(f"Failed for {treatment}: {e}")
             print(f"Saved failure summary: {summary_txt}")
 
-    global_summary_csv = build_run_output_csv(OUTPUT_DIR, "global_summary")
-    manager_global_summary_csv = build_run_output_csv(
+    global_summary_csv = os.path.join(OUTPUT_DIR, "global_summary.csv")
+    manager_global_summary_csv = os.path.join(
         OUTPUT_DIR,
-        "manager_global_summary",
+        "manager_global_summary.csv",
     )
     control_messages_csv = os.path.join(
         OUTPUT_DIR,
@@ -2701,6 +2712,10 @@ def main():
         ].copy()
         manager_global_summary_df.to_csv(manager_global_summary_csv, index=False)
         print(f"Saved manager global summary: {manager_global_summary_csv}")
+    print(
+        f"[3/3] CATE estimation run finished. Successful treatment summaries: "
+        f"{len(global_summary_rows)} / {len(TREATMENTS)}"
+    )
 
 
 if __name__ == "__main__":

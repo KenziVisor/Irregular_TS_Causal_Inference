@@ -1,11 +1,44 @@
 
+import argparse
+import os
+import pickle
+
 import matplotlib.pyplot as plt
 import networkx as nx
-import pickle
-import os
 
 
-def create_mimiciii_causal_graph(save=0) -> nx.DiGraph:
+DEFAULT_GRAPH_PKL_PATH = "../data/mimiciii_causal_graph.pkl"
+DEFAULT_GRAPH_PNG_PATH = "../data/mimiciii_causal_dag.png"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build the MIMIC-III causal DAG and save the graph artifacts."
+    )
+    parser.add_argument(
+        "--graph-pkl-path",
+        default=DEFAULT_GRAPH_PKL_PATH,
+        help=f"Output path for the graph pickle. Default: {DEFAULT_GRAPH_PKL_PATH}",
+    )
+    parser.add_argument(
+        "--graph-png-path",
+        default=DEFAULT_GRAPH_PNG_PATH,
+        help=f"Output path for the rendered graph PNG. Default: {DEFAULT_GRAPH_PNG_PATH}",
+    )
+    return parser.parse_args()
+
+
+def resolve_output_path(path_like: str) -> str:
+    raw_path = path_like.strip()
+    if not raw_path:
+        raise ValueError("Output path must be a non-empty string.")
+    return os.path.abspath(os.path.expanduser(raw_path))
+
+
+def create_mimiciii_causal_graph(
+    save=0,
+    graph_pkl_path: str | None = None,
+) -> nx.DiGraph:
     """
     Research-ready causal DAG for a clinically aggregated subset of MIMIC-III.
     This graph models background variables, latent physiologic states, observed
@@ -188,8 +221,16 @@ def create_mimiciii_causal_graph(save=0) -> nx.DiGraph:
     if not nx.is_directed_acyclic_graph(G):
         raise ValueError("Constructed graph is not a DAG")
 
+    print(
+        f"      Built MIMIC-III DAG with {G.number_of_nodes()} nodes and "
+        f"{G.number_of_edges()} edges."
+    )
+
     if save:
-        with open("../data/mimiciii_causal_graph.pkl", "wb") as f:
+        output_path = resolve_output_path(graph_pkl_path or DEFAULT_GRAPH_PKL_PATH)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        print(f"      Saving graph pickle to: {output_path}")
+        with open(output_path, "wb") as f:
             pickle.dump(G, f)
 
     return G
@@ -198,6 +239,7 @@ def create_mimiciii_causal_graph(save=0) -> nx.DiGraph:
 def draw_graph(
     G: nx.DiGraph,
     save=0,
+    graph_png_path: str | None = None,
     figsize=(24, 18),
     node_size=1500,
     font_size=8,
@@ -273,11 +315,26 @@ def draw_graph(
     plt.tight_layout()
 
     if save:
-        plt.savefig("../data/mimiciii_causal_dag.png", dpi=220, bbox_inches="tight")
+        output_path = resolve_output_path(graph_png_path or DEFAULT_GRAPH_PNG_PATH)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        print(f"      Saving DAG figure to: {output_path}")
+        plt.savefig(output_path, dpi=220, bbox_inches="tight")
     else:
         plt.show()
 
 
 if __name__ == "__main__":
-    g = create_mimiciii_causal_graph(save=1)
-    draw_graph(g, save=1)
+    args = parse_args()
+    print("=== Building MIMIC-III causal DAG ===")
+    print("[1/2] Creating graph structure")
+    g = create_mimiciii_causal_graph(
+        save=1,
+        graph_pkl_path=args.graph_pkl_path,
+    )
+    print("[2/2] Rendering graph figure")
+    draw_graph(
+        g,
+        save=1,
+        graph_png_path=args.graph_png_path,
+    )
+    print("MIMIC-III causal DAG build completed.")

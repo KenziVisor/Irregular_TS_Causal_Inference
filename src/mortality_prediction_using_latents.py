@@ -85,8 +85,10 @@ def resolve_output_path(
 
 
 def load_latents_and_outcomes(latent_tags_csv_path: str, physionet_ts_oc_ids_pkl_path: str) -> pd.DataFrame:
+    print(f"[1/5] Loading latent tags from: {latent_tags_csv_path}")
     # latent tags
     latent_df = pd.read_csv(latent_tags_csv_path)
+    print(f"      Loaded latent tags: {latent_df.shape[0]:,} rows, {latent_df.shape[1]} columns")
     if "ts_id" in latent_df.columns:
         latent_df = latent_df.copy()
     elif DATASET_MODEL == "mimic" and "icustay_id" in latent_df.columns:
@@ -97,13 +99,16 @@ def load_latents_and_outcomes(latent_tags_csv_path: str, physionet_ts_oc_ids_pkl
             f"--model mimic is used. Source: {latent_tags_csv_path}"
         )
 
+    print(f"[2/5] Loading processed outcomes from: {physionet_ts_oc_ids_pkl_path}")
     # outcomes (from your preprocess pickle)
     with open(physionet_ts_oc_ids_pkl_path, "rb") as f:
         ts, oc, ts_ids = pickle.load(f)
+    print(f"      Loaded processed pickle: ts rows={len(ts):,}, oc rows={len(oc):,}, patients={len(ts_ids):,}")
 
     # keep only what we need
     oc_small = oc[["ts_id", "in_hospital_mortality"]].copy()
 
+    print("[3/5] Merging latent tags with outcome labels")
     # merge
     latent_df["ts_id"] = latent_df["ts_id"].astype(str)
     oc_small["ts_id"] = oc_small["ts_id"].astype(str)
@@ -114,6 +119,7 @@ def load_latents_and_outcomes(latent_tags_csv_path: str, physionet_ts_oc_ids_pkl
         df = df.dropna(subset=["in_hospital_mortality"])
 
     df["in_hospital_mortality"] = df["in_hospital_mortality"].astype(int)
+    print(f"      Finished merge: {len(df):,} patients retained")
     return df
 
 
@@ -143,6 +149,7 @@ def evaluate_probs(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.
 # =========================
 
 def train_logreg(X_train, y_train, X_val, y_val):
+    print("[4/5] Training Logistic Regression baseline")
     # handle imbalance automatically
     clf = LogisticRegression(
         max_iter=2000,
@@ -206,6 +213,10 @@ def train_mlp(X_train, y_train, X_val, y_val, seed=42, epochs=50, batch_size=256
     np.random.seed(seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(
+        f"[5/5] Training MLP on device={device} | epochs={epochs} | "
+        f"batch_size={batch_size} | train_rows={len(y_train):,} | val_rows={len(y_val):,}"
+    )
 
     train_ds = TabDataset(X_train, y_train)
     val_ds = TabDataset(X_val, y_val)
@@ -270,6 +281,7 @@ def run_mortality_from_latents(
     val_size: float = 0.2,
     seed: int = 42,
 ):
+    print("=== Starting mortality prediction from latent tags ===")
     df = load_latents_and_outcomes(latent_tags_csv_path, physionet_ts_oc_ids_pkl_path)
     feat_cols = get_feature_columns(df)
 
@@ -321,6 +333,7 @@ def run_mortality_from_latents(
     if results_dir:
         os.makedirs(results_dir, exist_ok=True)
 
+    print(f"[save] Writing results summary to: {results_txt_path}")
     with open(results_txt_path, "w") as f:
         f.write("=== Mortality Prediction From Latent Variables ===\n\n")
 
@@ -377,6 +390,11 @@ def main():
         args.results_txt_path,
         dataset_defaults["results_txt_path"],
         "RESULTS_TXT_PATH",
+    )
+    print(
+        "Runtime configuration: "
+        f"model={DATASET_MODEL} | latent_tags_path={latent_path} | "
+        f"processed_pkl_path={physionet_pkl_path} | results_txt_path={results_path}"
     )
     return run_mortality_from_latents(latent_path, physionet_pkl_path, results_path)
 

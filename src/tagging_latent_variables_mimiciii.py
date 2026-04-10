@@ -263,6 +263,7 @@ PICKLE_EXPECTED_SUMMARY_COLUMNS = [
     "SuspectedInfection_any",
     "InHospitalMortality",
 ]
+PROGRESS_EVERY = 500
 
 
 # ============================================================
@@ -271,6 +272,13 @@ PICKLE_EXPECTED_SUMMARY_COLUMNS = [
 
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
+
+
+def print_progress(label: str, current: int, total: int) -> None:
+    if total <= 0:
+        return
+    if current == total or current % PROGRESS_EVERY == 0:
+        print(f"      {label}: {current:,} / {total:,}")
 
 
 def safe_float(x) -> float:
@@ -565,6 +573,7 @@ def load_raw_concept_tables(args) -> RawConceptTables:
 
 
 def load_mimic_pickle_payload(pkl_path: str) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
+    print(f"      Loading canonical MIMIC pickle payload from: {os.path.abspath(pkl_path)}")
     with open(pkl_path, "rb") as f:
         payload = pickle.load(f)
 
@@ -611,6 +620,10 @@ def load_mimic_pickle_payload(pkl_path: str) -> Tuple[pd.DataFrame, pd.DataFrame
     if not oc_ids.issubset(set(ts_ids)):
         raise ValueError("All oc.ts_id values must be contained in ts_ids.")
 
+    print(
+        f"      Loaded canonical payload: ts rows={len(ts):,}, oc rows={len(oc):,}, "
+        f"stays={len(ts_ids):,}"
+    )
     return ts, oc, ts_ids
 
 
@@ -644,13 +657,16 @@ def _aggregate_minimal_summary_stats_from_ts(ts: pd.DataFrame) -> pd.DataFrame:
 
     work["target_name"] = work["variable"].map(alias_to_target)
     rows = []
-    for stay_id, g_stay in work.groupby("ts_id", sort=False):
+    total_stays = int(work["ts_id"].nunique())
+    print(f"      Aggregating canonical summary stats for {total_stays:,} stays")
+    for stay_index, (stay_id, g_stay) in enumerate(work.groupby("ts_id", sort=False), start=1):
         row = {"icustay_id": stay_id}
         for target_name, g_var in g_stay.groupby("target_name", sort=False):
             stats = standard_stats(g_var.sort_values("minute")["value"])
             for stat_name, out_col in PICKLE_TS_SUMMARY_SPECS[target_name]["stats"].items():
                 row[out_col] = stats[stat_name]
         rows.append(row)
+        print_progress("Canonical summary stats aggregated", stay_index, total_stays)
 
     return pd.DataFrame(rows)
 
@@ -713,7 +729,9 @@ def _aggregate_urine_from_ts(ts: pd.DataFrame) -> pd.DataFrame:
 
     first_weight = _get_first_weight_by_stay(ts)
     rows = []
-    for stay_id, g in urine.groupby("ts_id", sort=False):
+    total_stays = int(urine["ts_id"].nunique())
+    print(f"      Aggregating urine features for {total_stays:,} stays")
+    for stay_index, (stay_id, g) in enumerate(urine.groupby("ts_id", sort=False), start=1):
         row = {"icustay_id": stay_id}
 
         first_day = g.loc[(g["minute"] >= 0) & (g["minute"] <= 24 * 60), "value"].dropna()
@@ -734,6 +752,7 @@ def _aggregate_urine_from_ts(ts: pd.DataFrame) -> pd.DataFrame:
             row["UrineOutput_mlkg_6h_min"] = np.nan
 
         rows.append(row)
+        print_progress("Urine features aggregated", stay_index, total_stays)
 
     return pd.DataFrame(rows)
 
@@ -787,14 +806,20 @@ def build_summary_df_from_ts_oc(
     oc: pd.DataFrame,
     ts_ids: List[str],
 ) -> pd.DataFrame:
+    print(f"      Building canonical summary dataframe for {len(ts_ids):,} stays")
     summary = pd.DataFrame({"icustay_id": ts_ids})
 
+    print("      Stage A: summary statistics from canonical time-series")
     summary = summary.merge(_aggregate_minimal_summary_stats_from_ts(ts), on="icustay_id", how="left")
+    print("      Stage B: deriving GCS minima from canonical time-series")
     summary = summary.merge(_aggregate_gcs_min_from_ts(ts), on="icustay_id", how="left")
+    print("      Stage C: aggregating urine output features")
     summary = summary.merge(_aggregate_urine_from_ts(ts), on="icustay_id", how="left")
+    print("      Stage D: merging optional outcome/context columns from oc")
     summary = _merge_optional_oc_fields(summary, oc)
 
     for out_name, source_variables in PICKLE_TS_BINARY_HELPERS.items():
+        print(f"      Stage E: deriving helper flag '{out_name}'")
         helper_df, available = _aggregate_binary_any_from_ts(ts, source_variables, out_name)
         if available:
             summary = summary.merge(helper_df, on="icustay_id", how="left")
@@ -817,6 +842,7 @@ def build_summary_df_from_ts_oc(
             summary[col] = np.nan
 
     validate_mimic_pickle_summary(summary)
+    print(f"      Canonical summary dataframe ready: {summary.shape}")
     return summary
 
 
@@ -890,8 +916,9 @@ def _aggregate_named_variable_events(
     if df is None or df.empty:
         return pd.DataFrame({id_col: []})
 
+    variables = list(variables)
     work = df.copy()
-    work = work[work[variable_col].isin(list(variables))].copy()
+    work = work[work[variable_col].isin(variables)].copy()
     if work.empty:
         return pd.DataFrame({id_col: []})
 
@@ -900,7 +927,12 @@ def _aggregate_named_variable_events(
     work = work.dropna(subset=[id_col, time_col])
 
     rows = []
-    for stay_id, g in work.groupby(id_col):
+    total_stays = int(work[id_col].nunique())
+    print(
+        f"      Aggregating {len(variables)} variables from '{variable_col}' "
+        f"for {total_stays:,} stays"
+    )
+    for stay_index, (stay_id, g) in enumerate(work.groupby(id_col), start=1):
         g = g.sort_values(time_col)
         row = {id_col: stay_id}
 
@@ -910,6 +942,7 @@ def _aggregate_named_variable_events(
                 row[f"{var}_{stat_name}"] = stat_val
 
         rows.append(row)
+        print_progress("Raw-table summary aggregation", stay_index, total_stays)
 
     return pd.DataFrame(rows)
 
@@ -1076,12 +1109,15 @@ def build_summary_from_raw_tables(raw: RawConceptTables) -> pd.DataFrame:
         raise ValueError("admissions_csv must include column 'icustay_id'.")
 
     summary = admissions.copy()
+    print(f"      Admissions rows loaded: {len(summary):,}")
 
     # ICD-based helper flags
+    print("      Stage A: adding ICD-derived helper flags")
     summary = add_icd_flags(summary, raw.diagnoses)
 
     # Vitals aggregation
     if raw.vitals is not None and not raw.vitals.empty:
+        print(f"      Stage B: aggregating vitals rows={len(raw.vitals):,}")
         vitals_summary = _aggregate_named_variable_events(
             raw.vitals,
             id_col="icustay_id",
@@ -1093,9 +1129,11 @@ def build_summary_from_raw_tables(raw: RawConceptTables) -> pd.DataFrame:
             ],
         )
         summary = summary.merge(vitals_summary, on="icustay_id", how="left")
+        print(f"      Summary shape after vitals merge: {summary.shape}")
 
     # Labs aggregation
     if raw.labs is not None and not raw.labs.empty:
+        print(f"      Stage C: aggregating labs rows={len(raw.labs):,}")
         labs_summary = _aggregate_named_variable_events(
             raw.labs,
             id_col="icustay_id",
@@ -1110,13 +1148,17 @@ def build_summary_from_raw_tables(raw: RawConceptTables) -> pd.DataFrame:
             ],
         )
         summary = summary.merge(labs_summary, on="icustay_id", how="left")
+        print(f"      Summary shape after labs merge: {summary.shape}")
 
     # Urine aggregation
+    print("      Stage D: aggregating urine features")
     urine_summary = _aggregate_urine(raw.urine)
     summary = summary.merge(urine_summary, on="icustay_id", how="left")
+    print(f"      Summary shape after urine merge: {summary.shape}")
 
     # Vasopressors
     if raw.vaso is not None and not raw.vaso.empty:
+        print(f"      Stage E: aggregating vasopressor flags from {len(raw.vaso):,} rows")
         vaso = raw.vaso.copy()
         if "vasopressor" not in vaso.columns:
             vaso["vasopressor"] = 1
@@ -1125,6 +1167,7 @@ def build_summary_from_raw_tables(raw: RawConceptTables) -> pd.DataFrame:
 
     # Mechanical ventilation
     if raw.vent is not None and not raw.vent.empty:
+        print(f"      Stage F: aggregating ventilation flags from {len(raw.vent):,} rows")
         vent = raw.vent.copy()
         if "mechanical_ventilation" not in vent.columns:
             vent["mechanical_ventilation"] = 1
@@ -1132,11 +1175,13 @@ def build_summary_from_raw_tables(raw: RawConceptTables) -> pd.DataFrame:
         summary = summary.merge(vent_summary, on="icustay_id", how="left")
 
     # Infection flag
+    print("      Stage G: aggregating infection suspicion flags")
     infection_summary = _aggregate_infection(raw.cultures_antibiotics)
     summary = summary.merge(infection_summary, on="icustay_id", how="left")
 
     # Troponin positivity map
     if raw.troponin_map is not None and not raw.troponin_map.empty:
+        print(f"      Stage H: aggregating troponin positivity from {len(raw.troponin_map):,} rows")
         tmap = raw.troponin_map.copy()
         cols_needed = {"icustay_id", "troponin_positive"}
         if cols_needed.issubset(set(tmap.columns)):
@@ -1156,6 +1201,7 @@ def build_summary_from_raw_tables(raw: RawConceptTables) -> pd.DataFrame:
 
     summary = _compute_sirs_features(summary)
     summary = _compute_derived_features(summary)
+    print(f"      Raw-table summary dataframe ready: {summary.shape}")
     return summary
 
 
@@ -1194,11 +1240,14 @@ def apply_decision_trees(
     decision_trees: Dict[str, Callable[[pd.Series], int]],
 ) -> pd.DataFrame:
     rows = []
-    for _, row in summary_df.iterrows():
+    total_rows = len(summary_df)
+    print(f"      Applying latent decision trees to {total_rows:,} ICU stays")
+    for row_index, (_, row) in enumerate(summary_df.iterrows(), start=1):
         out = {"icustay_id": row["icustay_id"]}
         for latent_name, fn in decision_trees.items():
             out[latent_name] = int(fn(row))
         rows.append(out)
+        print_progress("Latent tags applied", row_index, total_rows)
     return pd.DataFrame(rows)
 
 
@@ -1331,6 +1380,7 @@ def save_outputs(
     cooccur_path = os.path.join(output_dir, "cooccurrence_phi.csv")
     validation_path = os.path.join(output_dir, "validation_summary.json")
 
+    print(f"      Saving output files under: {os.path.abspath(output_dir)}")
     latent_df.to_csv(tags_path, index=False)
     summary_df.merge(latent_df, on="icustay_id", how="left").to_csv(merged_path, index=False)
     prevalence_table(latent_df).to_csv(prevalence_path, index=False)
@@ -1342,6 +1392,7 @@ def save_outputs(
 
     with open(validation_path, "w", encoding="utf-8") as f:
         json.dump(validation_summary, f, indent=2)
+    print("      Finished saving latent tags, merged features, validation tables, and decision trees")
 
 
 # ============================================================
@@ -1377,6 +1428,8 @@ def parse_args():
 def main():
     args = parse_args()
     ensure_dir(args.output_dir)
+    print("=== Starting MIMIC-III latent tagging ===")
+    print(f"Output directory: {os.path.abspath(args.output_dir)}")
 
     summary_mode = args.summary_csv is not None
     pkl_mode = args.pkl_path is not None
@@ -1409,6 +1462,18 @@ def main():
     else:
         print("[1/5] Loading raw concept CSVs...")
         raw = load_raw_concept_tables(args)
+        print(
+            "      Raw table availability: "
+            f"admissions={0 if raw.admissions is None else len(raw.admissions):,}, "
+            f"diagnoses={0 if raw.diagnoses is None else len(raw.diagnoses):,}, "
+            f"vitals={0 if raw.vitals is None else len(raw.vitals):,}, "
+            f"labs={0 if raw.labs is None else len(raw.labs):,}, "
+            f"urine={0 if raw.urine is None else len(raw.urine):,}, "
+            f"vaso={0 if raw.vaso is None else len(raw.vaso):,}, "
+            f"vent={0 if raw.vent is None else len(raw.vent):,}, "
+            f"infection={0 if raw.cultures_antibiotics is None else len(raw.cultures_antibiotics):,}, "
+            f"troponin_map={0 if raw.troponin_map is None else len(raw.troponin_map):,}"
+        )
         print("[2/5] Building summary dataframe from raw concept tables...")
         summary_df = build_summary_from_raw_tables(raw)
 
@@ -1418,9 +1483,11 @@ def main():
     print(f"[3/5] Summary dataframe shape: {summary_df.shape}")
 
     decision_trees = get_latent_decision_trees()
+    print(f"      Latent definitions loaded: {len(decision_trees)}")
 
     print("[4/5] Applying decision trees...")
     latent_df = apply_decision_trees(summary_df, decision_trees)
+    print(f"      Latent tag dataframe shape: {latent_df.shape}")
 
     print("[5/5] Running validation and saving outputs...")
     validation_summary = build_validation_summary(latent_df, summary_df)

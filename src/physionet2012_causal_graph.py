@@ -1,10 +1,43 @@
-import matplotlib.pyplot as plt
-import networkx as nx
+import argparse
 import os
 import pickle
 
+import matplotlib.pyplot as plt
+import networkx as nx
 
-def create_physionet2012_causal_graph(save=0) -> nx.DiGraph:
+
+DEFAULT_GRAPH_PKL_PATH = "../data/causal_graph.pkl"
+DEFAULT_GRAPH_PNG_PATH = "../PhysioNet 2012 – Causal DAG.png"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build the PhysioNet 2012 causal DAG and save the graph artifacts."
+    )
+    parser.add_argument(
+        "--graph-pkl-path",
+        default=DEFAULT_GRAPH_PKL_PATH,
+        help=f"Output path for the graph pickle. Default: {DEFAULT_GRAPH_PKL_PATH}",
+    )
+    parser.add_argument(
+        "--graph-png-path",
+        default=DEFAULT_GRAPH_PNG_PATH,
+        help=f"Output path for the rendered graph PNG. Default: {DEFAULT_GRAPH_PNG_PATH}",
+    )
+    return parser.parse_args()
+
+
+def resolve_output_path(path_like: str) -> str:
+    raw_path = path_like.strip()
+    if not raw_path:
+        raise ValueError("Output path must be a non-empty string.")
+    return os.path.abspath(os.path.expanduser(raw_path))
+
+
+def create_physionet2012_causal_graph(
+    save=0,
+    graph_pkl_path: str | None = None,
+) -> nx.DiGraph:
     """
     Create a directed acyclic graph (DAG) representing a clinically-plausible
     causal structure for PhysioNet / CinC Challenge 2012 variables.
@@ -211,20 +244,30 @@ def create_physionet2012_causal_graph(save=0) -> nx.DiGraph:
     if not nx.is_directed_acyclic_graph(G):
         raise ValueError("Constructed graph is not a DAG")
 
+    print(
+        f"      Built PhysioNet DAG with {G.number_of_nodes()} nodes and "
+        f"{G.number_of_edges()} edges."
+    )
+
     if save:
-        filename_graph = "../data/causal_graph.pkl"
+        filename_graph = resolve_output_path(
+            graph_pkl_path or DEFAULT_GRAPH_PKL_PATH
+        )
+        os.makedirs(os.path.dirname(filename_graph), exist_ok=True)
+        print(f"      Saving graph pickle to: {filename_graph}")
         with open(filename_graph, "wb") as file:
             pickle.dump(G, file)
         if os.path.exists(filename_graph):
             size = os.path.getsize(filename_graph)
             if size > 0:
-                print(f"✅ File '{filename_graph}' exists and has size {size} bytes.")
+                print(f"      Saved graph pickle ({size} bytes).")
     return G
 
 
 def draw_graph(
     G: nx.DiGraph,
     save = 0,
+    graph_png_path: str | None = None,
     figsize=(22, 18),
     node_size=1400,
     font_size=8,
@@ -357,15 +400,34 @@ def draw_graph(
     plt.axis("off")
     plt.tight_layout()
     if save:
-        file_name = "../PhysioNet 2012 – Causal DAG.png"
+        file_name = resolve_output_path(graph_png_path or DEFAULT_GRAPH_PNG_PATH)
+        os.makedirs(os.path.dirname(file_name), exist_ok=True)
+        print(f"      Saving DAG figure to: {file_name}")
         plt.savefig(file_name)
         if os.path.exists(file_name):
             size = os.path.getsize(file_name)
             if size > 0:
-                print(f"✅ File '{file_name}' exists and has size {size} bytes.")
+                print(f"      Saved DAG figure ({size} bytes).")
     else:
         plt.show()
 
 
-g = create_physionet2012_causal_graph(save=1)
-draw_graph(g, save=1)
+def main() -> None:
+    args = parse_args()
+    print("=== Building PhysioNet 2012 causal DAG ===")
+    print("[1/2] Creating graph structure")
+    g = create_physionet2012_causal_graph(
+        save=1,
+        graph_pkl_path=args.graph_pkl_path,
+    )
+    print("[2/2] Rendering graph figure")
+    draw_graph(
+        g,
+        save=1,
+        graph_png_path=args.graph_png_path,
+    )
+    print("PhysioNet 2012 causal DAG build completed.")
+
+
+if __name__ == "__main__":
+    main()

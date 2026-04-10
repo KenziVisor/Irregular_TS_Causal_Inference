@@ -14,8 +14,19 @@ from preprocess_mimic_iii_large_contract import (
 
 RAW_DATA_PATH = '../mimiciii'
 OUTPUT_PATH = '../data/processed/mimic_iii_ts_oc_ids.pkl'
+TOTAL_STAGES = 10
+
+
+def log_stage(step: int, message: str) -> None:
+    print(f"[{step}/{TOTAL_STAGES}] {message}")
+
+
+print("=== Starting MIMIC-III preprocessing ===")
+print(f"Raw data root: {os.path.abspath(RAW_DATA_PATH)}")
+print(f"Output artifact: {os.path.abspath(OUTPUT_PATH)}")
 
 # Get all ICU stays.
+log_stage(1, "Loading ICU stays and patient demographics")
 icu = pd.read_csv(os.path.join(RAW_DATA_PATH,'ICUSTAYS.csv'), 
                   usecols=['SUBJECT_ID', 'HADM_ID', 'ICUSTAY_ID', 
                            'INTIME', 'OUTTIME'])
@@ -30,13 +41,17 @@ icu['INTIME'] = pd.to_datetime(icu.INTIME)
 icu['DOB'] = pd.to_datetime(icu.DOB)
 icu['AGE'] = icu.INTIME.map(lambda x:x.year) - icu.DOB.map(lambda x:x.year)
 icu = icu.loc[icu.AGE>=18] #53k icustays
+print(f"      Adult ICU stays retained: {len(icu):,}")
 
 # Extract chartevents for icu stays.
+log_stage(2, "Reading CHARTEVENTS chunks for retained ICU stays")
 ch = []
 for chunk in tqdm(pd.read_csv(os.path.join(RAW_DATA_PATH,'CHARTEVENTS.csv'), 
                               chunksize=10000000,
                 usecols = ['HADM_ID', 'ICUSTAY_ID', 'ITEMID', 'CHARTTIME', 
-                           'VALUE', 'VALUENUM', 'VALUEUOM', 'ERROR'])):
+                           'VALUE', 'VALUENUM', 'VALUEUOM', 'ERROR']),
+                  desc='Reading CHARTEVENTS chunks',
+                  unit='chunk'):
     chunk = chunk.loc[chunk.ICUSTAY_ID.isin(icu.ICUSTAY_ID)]
     chunk = chunk.loc[chunk['ERROR']!=1]
     chunk = chunk.loc[chunk.CHARTTIME.notna()]
@@ -46,9 +61,10 @@ del chunk
 ch = pd.concat(ch)
 ch = ch.loc[~(ch.VALUE.isna() & ch.VALUENUM.isna())]
 ch['TABLE'] = 'chart'
-print ('Read chartevents')
+print(f"      CHARTEVENTS rows retained: {len(ch):,}")
 
 # Extract labevents for admissions.
+log_stage(3, "Reading LABEVENTS for retained admissions")
 la = pd.read_csv(os.path.join(RAW_DATA_PATH, 'LABEVENTS.csv'), 
                  usecols = ['HADM_ID', 'ITEMID', 'CHARTTIME', 
                             'VALUE', 'VALUENUM', 'VALUEUOM'])
@@ -58,10 +74,11 @@ la = la.loc[la.CHARTTIME.notna()]
 la = la.loc[~(la.VALUE.isna() & la.VALUENUM.isna())]
 la['ICUSTAY_ID'] = np.nan
 la['TABLE'] = 'lab'
-print ('Read labevents')
+print(f"      LABEVENTS rows retained: {len(la):,}")
 
 # Extract bp events. Remove outliers. Make sure median 
 # values of CareVue and MetaVision items are close.
+log_stage(4, "Extracting chart/lab-derived clinical variables")
 dbp = [8368, 220051, 225310, 8555, 8441, 220180, 8502, 
        8440, 8503, 8504, 8507, 8506, 224643, 227242]
 sbp = [51, 220050, 225309, 6701, 455, 220179, 3313, 3315, 
@@ -327,8 +344,8 @@ features = {'O2 Saturation': [o2sat, [0,100], '%'],
             'RBC': [rbc, [0,14], 'm/uL']
             }
 
-for k, v in features.items():
-    print (k)
+for feature_index, (k, v) in enumerate(features.items(), start=1):
+    print(f"      [chart/lab feature {feature_index}/{len(features)}] {k}")
     ev_k = pd.concat((ch.loc[ch.ITEMID.isin(v[0])], la.loc[la.ITEMID.isin(v[0])]))
     ev_k = ev_k.loc[(ev_k.VALUENUM>=v[1][0])&(ev_k.VALUENUM<=v[1][1])]
     ev_k['NAME'] = k
@@ -337,11 +354,13 @@ for k, v in features.items():
     assert (ev_k.VALUENUM.isna().sum()==0)
     events = pd.concat([events, ev_k])
 del ev_k
+print(f"      Rows accumulated after chart/lab extraction: {len(events):,}")
 
 # Free some memory.
 del ch, la
 
 # Extract outputevents.
+log_stage(5, "Reading OUTPUTEVENTS and extracting output variables")
 oe = pd.read_csv(os.path.join(RAW_DATA_PATH,'OUTPUTEVENTS.csv'), 
                  usecols = ['ICUSTAY_ID', 'ITEMID', 'CHARTTIME', 'VALUE', 'VALUEUOM'])
 oe = oe.loc[oe.VALUE.notna()]
@@ -388,8 +407,8 @@ features = {'Ultrafiltrate': [uf, [0,7000],'mL'],
             'Pre-admission Output': [pre, [0, 13000], 'ml']
             }
 
-for k, v in features.items():
-    print (k)
+for feature_index, (k, v) in enumerate(features.items(), start=1):
+    print(f"      [output feature {feature_index}/{len(features)}] {k}")
     ev_k = oe.loc[oe.ITEMID.isin(v[0])]
     ind = (ev_k.VALUENUM>=v[1][0])&(ev_k.VALUENUM<=v[1][1])
     med = ev_k.VALUENUM.loc[ind].median()
@@ -398,8 +417,10 @@ for k, v in features.items():
     ev_k['VALUEUOM'] = v[2]
     events = pd.concat([events, ev_k])
 del ev_k
+print(f"      Rows accumulated after output extraction: {len(events):,}")
 
 # Extract CV and MV inputevents.
+log_stage(6, "Reading INPUTEVENTS tables and splitting long MetaVision intervals")
 ie_cv = pd.read_csv(os.path.join(RAW_DATA_PATH,'INPUTEVENTS_CV.csv'),
     usecols = ['ICUSTAY_ID', 'ITEMID', 'CHARTTIME', 
                'AMOUNT', 'AMOUNTUOM'])
@@ -420,7 +441,11 @@ ie_mv['TD'] = ie_mv.ENDTIME - ie_mv.STARTTIME
 new_ie_mv = ie_mv.loc[ie_mv.TD<=pd.Timedelta(1,'h')].drop(columns=['STARTTIME', 'TD'])
 ie_mv = ie_mv.loc[ie_mv.TD>pd.Timedelta(1,'h')]
 new_rows = []
-for _,row in tqdm(ie_mv.iterrows()):
+for _,row in tqdm(
+        ie_mv.iterrows(),
+        total=len(ie_mv),
+        desc='Splitting long MV intervals',
+        unit='row'):
     icuid, iid, amo, uom, stm, td = row.ICUSTAY_ID, row.ITEMID, row.AMOUNT, row.AMOUNTUOM, row.STARTTIME, row.TD
     td = td.total_seconds()/60
     num_hours = td // 60
@@ -442,6 +467,7 @@ ie = pd.concat((ie_cv, ie_mv))
 del ie_cv, ie_mv
 ie.rename(columns={'AMOUNT':'VALUENUM', 'AMOUNTUOM':'VALUEUOM'}, inplace=True)
 events.CHARTTIME = pd.to_datetime(events.CHARTTIME)
+print(f"      Combined input-event rows retained: {len(ie):,}")
 
 # Convert mcg->mg, L->ml.
 ind = (ie.VALUEUOM=='mcg')
@@ -614,6 +640,7 @@ events = pd.concat([events, ev_poch])
 del ev_poch
 
 # Extract multiple events. Remove outliers.
+log_stage(7, "Extracting medication and infusion variables from input events")
 mida = [30124, 221668]
 prop = [30131, 222168]
 albu25 = [220862, 30009]
@@ -708,8 +735,8 @@ features = {'Midazolam': [mida, [0, 500], 'mg'],
             'Pre-admission Intake': [prad, [0, 30000], 'ml']
             }
 
-for k, v in features.items():
-    print (k)
+for feature_index, (k, v) in enumerate(features.items(), start=1):
+    print(f"      [input feature {feature_index}/{len(features)}] {k}")
     ev_k = ie.loc[ie.ITEMID.isin(v[0])]
     ind = (ev_k.VALUENUM>=v[1][0])&(ev_k.VALUENUM<=v[1][1])
     med = ev_k.VALUENUM.loc[ind].median()
@@ -718,6 +745,7 @@ for k, v in features.items():
     ev_k['VALUEUOM'] = v[2]
     events = pd.concat([events, ev_k])
 del ev_k
+print(f"      Rows accumulated after medication/input extraction: {len(events):,}")
 
 # Extract heparin events. (Missed earlier.)
 ev_k = ie.loc[ie.ITEMID.isin(hepa)]
@@ -749,12 +777,13 @@ icu.INTIME = pd.to_datetime(icu.INTIME)
 icu.OUTTIME = pd.to_datetime(icu.OUTTIME)
 
 # Assign ICUSTAY_ID to rows without it. Remove rows that can't be assigned one.
+log_stage(8, "Aligning events to ICU stays and building relative admission timelines")
 icu['icustay_times'] = icu.apply(lambda x:[x.ICUSTAY_ID, x.INTIME, x.OUTTIME], axis=1)
 adm_icu_times = icu.groupby('HADM_ID').agg({'icustay_times':list}).reset_index()
 icu.drop(columns=['icustay_times'], inplace=True)
 events = events.merge(adm_icu_times, on=['HADM_ID'], how='left')
 idx = events.ICUSTAY_ID.isna()
-tqdm.pandas()
+tqdm.pandas(desc='Assigning ICU stays to unmatched events')
 def f(x):
     chart_time = x.CHARTTIME
     for icu_times in x.icustay_times:
@@ -788,6 +817,8 @@ icu = icu.loc[((icu.DEATHTIME-icu.INTIME)>=pd.Timedelta(24,'h'))|icu.DEATHTIME.i
 icu = icu.loc[icu.ICUSTAY_ID.isin(events.loc[events.rel_charttime<24*60].ICUSTAY_ID)]
 final_icu = icu.copy()
 events = events.loc[events.ICUSTAY_ID.isin(final_icu.ICUSTAY_ID)].copy()
+print(f"      Events retained after timeline alignment: {len(events):,}")
+print(f"      ICU stays retained after cohort filters: {len(final_icu):,}")
 
 # Rename some columns.
 events.rename(columns={'rel_charttime':'minute', 'NAME':'variable', 
@@ -821,7 +852,9 @@ events.drop_duplicates(inplace=True)
 
 # Stage 2: canonicalize into final ts.
 # Keep TABLE only as internal extraction metadata; it must not appear in the final ts.
+log_stage(9, "Canonicalizing extracted events into PhysioNet-style ts/oc tables")
 ts = build_canonical_ts(events)
+print(f"      Canonical ts shape: {ts.shape}")
 
 # Stage 3: canonicalize into final oc.
 admissions = pd.read_csv(
@@ -833,11 +866,17 @@ admissions = pd.read_csv(
 # so the artifact can behave like a drop-in sibling of the PhysioNet output.
 ts_ids = build_ts_ids(ts)
 oc = build_canonical_oc(final_icu, admissions, valid_ts_ids=ts_ids)
+print(f"      Canonical oc shape: {oc.shape}")
 
 # Stage 4: regenerate ts_ids from the exported ts and validate alignment.
 ts_ids = build_ts_ids(ts)
 assert_physionet_compatible_output(ts, oc, ts_ids)
 
 # Stage 5: serialize the final PhysioNet-compatible payload.
+log_stage(10, "Validating and saving the processed MIMIC artifact")
 os.makedirs('../data/processed', exist_ok=True)
 serialize_processed_output(ts, oc, ts_ids, OUTPUT_PATH)
+print(
+    f"Saved processed MIMIC artifact to: {os.path.abspath(OUTPUT_PATH)} | "
+    f"ts rows={len(ts):,} | oc rows={len(oc):,} | stays={len(ts_ids):,}"
+)

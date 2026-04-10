@@ -14,7 +14,7 @@ The main idea is:
 
 This is script-first research code, not a package:
 
-- `main.py` is empty
+- `main.py` is now the top-level post-preprocessing orchestrator: graph build -> majority-vote latents -> background mortality/matching -> foreground CATE -> saved-model analysis -> permutations
 - `requirements.txt` now exists and pins the WSL analysis stack used for the current sensitivity pipeline
 - there is no test suite
 
@@ -24,7 +24,7 @@ This is script-first research code, not a package:
 - Relative paths are fragile. Do not assume running from repo root is safe.
 - Most `src/*.py` files use paths like `../../data/...` and `../../physionet2012/...` relative to the process working directory.
 - `src/draft/*.py` usually assume `../../../data/...`.
-- `src/physionet2012_causal_graph.py` is inconsistent with the rest of the repo and saves to `../data/causal_graph.pkl`.
+- Both causal graph scripts now support explicit `--graph-pkl-path` / `--graph-png-path` CLI outputs; if flags are omitted they still fall back to their historical relative defaults.
 - Generated result folders under `src/run_*` are archived experiment outputs, not source code.
 
 ## Repo Map
@@ -32,12 +32,13 @@ This is script-first research code, not a package:
 - `src/preprocess_physionet_2012.py`: raw PhysioNet files -> processed pickle. Auto-runs on import.
 - `src/preprocess_mimic_iii_large.py`: raw MIMIC-III ICU data -> processed pickle. Final exported artifact is now PhysioNet-compatible `[ts, oc, ts_ids]`; internal `TABLE`, `HADM_ID`, `SUBJECT_ID`, and legacy split arrays are not part of the main pickle.
 - `src/preprocess_mimic_iii_large_contract.py`: pure compatibility helpers for canonicalizing MIMIC exports into PhysioNet-style `ts`, `oc`, and `ts_ids`, plus strict schema validation.
+- `main.py`: top-level post-preprocessing orchestrator. Uses subprocesses only, writes one subdirectory per stage plus `logs/` and `run_summary.json`, and expects preprocessing to be complete before it runs.
 - `src/tagging_latent_variables_mimiciii.py`: rule-based MIMIC latent tagger. Supports summary CSV, raw concept CSVs, and canonical `[ts, oc, ts_ids]` pickle input; pickle mode reconstructs only the rule-needed summary fields from canonical `ts`/`oc`, with key aliases such as `MBP -> MAP`, `PCO2 -> PaCO2`, `PO2 -> PaO2`, `O2 Saturation -> SpO2`, `Creatinine Blood -> Creatinine`, and `Bilirubin (Total) -> Bilirubin`, and computes `GCS_min` from `GCS_eye`, `GCS_motor`, `GCS_verbal`.
-- `src/physionet2012_causal_graph.py`: builds DAG, saves graph pickle and PNG. Auto-runs on import.
+- `src/physionet2012_causal_graph.py`: builds the PhysioNet DAG and now supports explicit graph pickle / PNG output paths via CLI.
 - `src/tagging_latent_variables.py`: older summary-statistics latent tagger. Auto-runs on import.
 - `src/clinically_sufficient_tagging_latent_variables.py`: newer clinical/windowed latent tagger. Guarded by `if __name__ == "__main__":`.
 - `src/optimize_latent_thresholds.py`: Optuna threshold search for the older tagger only. Guarded.
-- `src/mortality_prediction_using_latents.py`: mortality prediction from latent tags using Logistic Regression and a small PyTorch MLP. Auto-runs on import.
+- `src/mortality_prediction_using_latents.py`: mortality prediction from latent tags using Logistic Regression and a small PyTorch MLP. Guarded by `if __name__ == "__main__":`.
 - `src/matching_causal_effect.py`: DAG-guided confounder selection + greedy Hamming matching baseline. Guarded.
 - `src/cate_estimation.py`: DAG-guided confounder selection + EconML `CausalForestDML` / `LinearDML`. Guarded. This is the current main causal script.
 - `src/permutations_test.py`: permutation-test orchestration wrapper around `cate_estimation.py`. Calls it via subprocess, reads run-level summary CSVs, keeps only aggregated metrics, and deletes per-trial temp inputs / output dirs immediately.
@@ -136,6 +137,7 @@ Why this is the best default:
 ### `src/physionet2012_causal_graph.py`
 
 - Builds a hand-crafted clinical `networkx.DiGraph`.
+- Supports `--graph-pkl-path` and `--graph-png-path`; omitted flags preserve the older relative default output locations.
 - Background nodes: `Age`, `Gender`, `Height`, `Weight`, `ICUType`.
 - Latent nodes: `ChronicRisk`, `AcuteInsult`, `Severity`, `Shock`, `RespFail`, `RenalFail`, `HepFail`, `HemeFail`, `Inflam`, `NeuroFail`, `CardInj`, `Metab`.
 - Observed nodes are vitals, labs, interventions, and the outcome node `Death`.
@@ -145,8 +147,8 @@ Why this is the best default:
   - `Severity` -> organ-failure latent states
   - latent states -> observed measurements
   - `Severity`, several organ failures, and `Age` -> `Death`
-- Saves `../data/causal_graph.pkl` and `../PhysioNet 2012 - Causal DAG.png`.
-- Auto-runs on import.
+- Saves `../data/causal_graph.pkl` and `../PhysioNet 2012 - Causal DAG.png` when CLI output flags are omitted.
+- Guarded by `if __name__ == "__main__":`.
 
 ### `src/tagging_latent_variables.py` (older tagger)
 
@@ -199,7 +201,7 @@ Known issue:
 - Scales features with `StandardScaler`.
 - In practice uses an 80/10/10 train/val/test split because the temp split is hard-coded to `0.5`; the `val_size` argument is not actually used.
 - Writes `clinical_mortality_prediction_results.txt`.
-- Auto-runs on import.
+- Guarded by `if __name__ == "__main__":`.
 
 ### `src/matching_causal_effect.py`
 
@@ -235,8 +237,8 @@ Known issue:
   - `--use-expanded-safe-confounders`
   - `--model-type`
 - The three main input paths plus `OUTPUT_DIR` now resolve via CLI-first, then script-level globals; missing or invalid paths fail clearly before loading.
-- Startup logs now print the resolved input/output paths and a runtime device selection (`cuda` if `torch.cuda.is_available()`, else `cpu`).
-- Important: current EconML / scikit-learn estimators remain CPU-bound in practice, so CUDA selection is provenance/reporting only unless future code adds GPU-aware components.
+- Startup logs now print the resolved input/output paths plus CPU execution provenance. The script records CUDA availability/count for metadata, but reports the runtime execution device as `cpu`.
+- Important: current EconML / scikit-learn estimators remain CPU-bound in practice, so CUDA metadata is provenance/reporting only unless future code adds GPU-aware components.
 - Loads latent tags, outcome, and background features.
 - Uses the DAG for confounder discovery.
 - Uses a fixed preferred set of effect modifiers:
@@ -261,9 +263,11 @@ Known issue:
 ### `src/analyze_cate_results.py`
 
 - Reads the saved `<Treatment>_model.pkl` artifacts under the CATE output directory and recomputes / validates sensitivity outputs, benchmark proxy scores, and contour artifacts.
+- Keeps `--results-dir` as the input CATE artifact root and now also supports `--output-dir`; when `--output-dir` is provided, all analysis artifacts are written there instead of mixing back into the CATE results directory.
 - Writes per treatment:
   - `<Treatment>_benchmark_scores.csv`
   - `<Treatment>_benchmark_report.txt`
+  - `<Treatment>_sensitivity_contour.png`
 - Writes run-level summaries:
   - `benchmark_summary.csv`: cleaned numeric analysis results table with stable `row_id`
   - `control_messages_analyze_cate_results.csv`: source labels / warnings / path fields joinable on `row_id`, `treatment`, `model_type`
@@ -314,7 +318,7 @@ Each run folder contains per-treatment outputs plus `global_summary.csv` and `ma
 - `Height` exists in the DAG but is ignored by the current main causal scripts.
 - The simple tagger and the Optuna optimizer belong to the older summary-statistics pipeline.
 - `matching_causal_effect.py` still defaults to the older `latent_tags.csv` path.
-- Several scripts auto-run when imported: preprocess, DAG construction, simple tagging, mortality prediction, and `draft/treatment_split.py`.
+- Several scripts auto-run when imported: preprocess, simple tagging, and `draft/treatment_split.py`.
 - Default output directories are relative to the process cwd; this is why archived run folders ended up directly under `src/`.
 - Saved CATE model pickles under `data/relevant_outputs/cate_outputs_predicted_230326` were created with a newer stack than the current unpinned Python 3.8 requirements environment: they reference `econml.validate.sensitivity_analysis.SensitivityParams` and `scikit-learn 1.5.1`, so artifact-side validation may require a compatibility shim or a one-time refit fallback.
 - In the older WSL `econml310` env with `econml 0.15.1`, loaded `LinearDML` / `CausalForestDML` estimators exposed `residuals_` and `summary()` when trained with `cache_values=True`, but they did not expose estimator-native `robustness_value()`, `sensitivity_summary()`, or `sensitivity_interval()`. That version mismatch was the main reason the old sensitivity pipeline fell back to manual calculations.

@@ -129,6 +129,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-tags-path", default=None)
     parser.add_argument("--physionet-pkl-path", default=None)
     parser.add_argument("--results-dir", default=None)
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            "Directory for all analysis outputs. Default: write into --results-dir, "
+            "matching the current behavior."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1906,16 +1914,30 @@ def empty_summary_row(treatment: str, report_path: Path, scores_path: Path) -> D
 
 
 def analyze_one_treatment(
-    treatment_dir: Path,
+    artifact_treatment_dir: Path,
+    output_treatment_dir: Path,
     analysis_df: pd.DataFrame | None,
     analysis_df_error: str | None,
     latent_tags_path: Path,
     physionet_pkl_path: Path,
 ) -> Dict[str, Any]:
-    treatment_hint = treatment_dir.name
-    model_path = treatment_dir / f"{treatment_hint}_model.pkl"
-    report_path = build_treatment_output_path(treatment_dir, treatment_hint, "benchmark_report", "txt")
-    scores_path = build_treatment_output_path(treatment_dir, treatment_hint, "benchmark_scores", "csv")
+    output_treatment_dir.mkdir(parents=True, exist_ok=True)
+
+    treatment_hint = artifact_treatment_dir.name
+    print(f"      [{treatment_hint}] Loading saved model artifact and diagnostics")
+    model_path = artifact_treatment_dir / f"{treatment_hint}_model.pkl"
+    report_path = build_treatment_output_path(
+        output_treatment_dir,
+        treatment_hint,
+        "benchmark_report",
+        "txt",
+    )
+    scores_path = build_treatment_output_path(
+        output_treatment_dir,
+        treatment_hint,
+        "benchmark_scores",
+        "csv",
+    )
 
     summary_row = empty_summary_row(treatment_hint, report_path, scores_path)
     warnings_list: List[str] = []
@@ -2077,6 +2099,7 @@ def analyze_one_treatment(
                 f"{analysis_df_error}"
             )
         else:
+            print(f"      [{treatment}] Reconstructing treatment matrices from saved artifact")
             prepared = prepare_treatment_matrices_from_artifact(analysis_df, artifact)
             report_data["analysis_summary"] = prepared
             summary_row["analysis_rows"] = prepared["analysis_rows"]
@@ -2152,6 +2175,7 @@ def analyze_one_treatment(
         compatibility_estimator = None
         compatibility_direct = empty_sensitivity_metrics()
         if need_compatibility_refit:
+            print(f"      [{treatment}] Starting compatibility refit for missing direct sensitivity APIs")
             compatibility_note = (
                 "Used compatibility refit with cache_values=True to test direct sensitivity APIs in "
                 f"{PREFERRED_ENV_NAME} and recover residual-space diagnostics when needed."
@@ -2344,7 +2368,7 @@ def analyze_one_treatment(
             contour_params_source = "custom_reconstructed_from_residual_params"
         contour_plot_path, contour_source, contour_notes = save_custom_sensitivity_contour(
             sensitivity_params=contour_params,
-            treatment_dir=treatment_dir,
+            treatment_dir=output_treatment_dir,
             treatment=treatment,
             benchmark_rows=selected_rows,
             source_label=contour_params_source,
@@ -2444,6 +2468,10 @@ def analyze_one_treatment(
         write_benchmark_report(report_path, report_data)
         summary_row["report_path"] = str(report_path)
         summary_row["benchmark_scores_path"] = str(scores_path)
+        print(
+            f"      [{treatment_hint}] Finished with status={summary_row['run_status']} | "
+            f"report={report_path}"
+        )
 
     return summary_row
 
@@ -2470,6 +2498,18 @@ def main() -> None:
     results_dir = resolve_script_path(
         args.results_dir if args.results_dir is not None else dataset_defaults["results_dir"]
     )
+    if not results_dir.exists():
+        raise FileNotFoundError(f"Results directory does not exist: {results_dir}")
+    if not results_dir.is_dir():
+        raise NotADirectoryError(f"Results directory is not a directory: {results_dir}")
+
+    output_dir = results_dir
+    if args.output_dir is not None:
+        output_dir = resolve_script_path(args.output_dir)
+    if output_dir.exists() and not output_dir.is_dir():
+        raise NotADirectoryError(f"Output directory is not a directory: {output_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     latent_tags_path = resolve_script_path(
         args.latent_tags_path
         if args.latent_tags_path is not None
@@ -2480,26 +2520,44 @@ def main() -> None:
         if args.physionet_pkl_path is not None
         else dataset_defaults["physionet_pkl_path"]
     )
+    print("=== Starting saved CATE analysis ===")
+    print(
+        "Runtime configuration: "
+        f"model={DATASET_MODEL} | latent_tags_path={latent_tags_path} | "
+        f"processed_pkl_path={physionet_pkl_path} | results_dir={results_dir} | "
+        f"output_dir={output_dir}"
+    )
 
     treatment_dirs = sorted(path for path in results_dir.iterdir() if path.is_dir())
-    run_summary_csv = build_run_output_csv(results_dir, "benchmark_summary")
-    control_messages_csv = results_dir / "control_messages_analyze_cate_results.csv"
+    run_summary_csv = output_dir / "benchmark_summary.csv"
+    control_messages_csv = output_dir / "control_messages_analyze_cate_results.csv"
+    print(f"[1/3] Found {len(treatment_dirs)} treatment result directories to analyze")
 
     analysis_df = None
     analysis_df_error = None
     try:
+        print("[2/3] Loading analysis dataframe for artifact reconstruction")
         analysis_df = load_analysis_dataframe(latent_tags_path, physionet_pkl_path)
+        print(f"      Analysis dataframe ready: {analysis_df.shape}")
     except Exception as exc:
         analysis_df_error = format_exception(exc)
+        print(f"      Analysis dataframe unavailable: {analysis_df_error}")
 
     summary_rows: List[Dict[str, Any]] = []
     success_count = 0
     partial_count = 0
     failed_count = 0
 
-    for treatment_dir in treatment_dirs:
+    print("[3/3] Starting per-treatment analysis loop")
+    for treatment_index, treatment_dir in enumerate(treatment_dirs, start=1):
+        print(
+            f"\n=== Analyze treatment {treatment_index}/{len(treatment_dirs)}: "
+            f"{treatment_dir.name} ==="
+        )
+        output_treatment_dir = output_dir / treatment_dir.name
         summary_row = analyze_one_treatment(
-            treatment_dir=treatment_dir,
+            artifact_treatment_dir=treatment_dir,
+            output_treatment_dir=output_treatment_dir,
             analysis_df=analysis_df,
             analysis_df_error=analysis_df_error,
             latent_tags_path=latent_tags_path,
@@ -2537,6 +2595,7 @@ def main() -> None:
         print(f"Partial: {partial_count}")
     print(f"Run-level summary CSV: {run_summary_csv}")
     print(f"Control messages CSV: {control_messages_csv}")
+    print("Saved CATE analysis run completed.")
 
 
 if __name__ == "__main__":

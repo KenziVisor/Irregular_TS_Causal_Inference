@@ -327,6 +327,7 @@ def run_cate_estimation_once(
         model_type,
     ]
 
+    print(f"      Launching cate_estimation.py with output dir: {output_dir}")
     process = subprocess.run(
         cmd,
         cwd=SCRIPT_DIR,
@@ -343,6 +344,7 @@ def run_cate_estimation_once(
         )
 
     summary_csv_path = find_summary_csv(output_dir)
+    print(f"      Completed cate_estimation.py run. Summary CSV: {summary_csv_path}")
     return extract_summary_metrics(summary_csv_path), summary_csv_path
 
 
@@ -525,6 +527,7 @@ def run_treatment_permutation_experiment(
         )
 
     results: List[Dict[str, object]] = []
+    total_trial_runs = len(baseline_treatments) * trials
 
     for treatment_index, treatment in enumerate(baseline_treatments):
         print(f"[Treatment permutation] {treatment} ({treatment_index + 1}/{len(baseline_treatments)})")
@@ -532,7 +535,11 @@ def run_treatment_permutation_experiment(
         permuted_mean_normalized_cates: List[float] = []
 
         for trial_index in range(trials):
-            print(f"  trial {trial_index + 1}/{trials}")
+            overall_trial_index = treatment_index * trials + trial_index + 1
+            print(
+                f"  trial {trial_index + 1}/{trials} | overall run "
+                f"{overall_trial_index}/{total_trial_runs}"
+            )
             trial_seed = build_trial_seed(seed, 1, treatment_index, trial_index)
             rng = np.random.default_rng(trial_seed)
 
@@ -542,11 +549,12 @@ def run_treatment_permutation_experiment(
             ) as temp_dir:
                 temp_latent_path = os.path.join(temp_dir, "latent_tags_permuted.csv")
                 temp_output_dir = os.path.join(temp_dir, "cate_run")
+                print(f"    temp latent CSV: {temp_latent_path}")
 
                 shuffled_df = shuffle_treatment_column(latent_df, treatment, rng)
                 shuffled_df.to_csv(temp_latent_path, index=False)
 
-                trial_summary_df, _ = run_cate_estimation_once(
+                trial_summary_df, summary_csv_path = run_cate_estimation_once(
                     latent_tags_path=temp_latent_path,
                     physionet_pkl_path=physionet_pkl_path,
                     graph_pkl_path=graph_pkl_path,
@@ -565,6 +573,13 @@ def run_treatment_permutation_experiment(
                 permuted_mean_normalized_cates.append(
                     float(trial_metrics_map[treatment]["mean_normalized_cate"])
                 )
+                print(
+                    f"    extracted metrics for {treatment}: "
+                    f"mean_cate={trial_metrics_map[treatment]['mean_cate']:.6f} | "
+                    f"mean_normalized_cate={trial_metrics_map[treatment]['mean_normalized_cate']:.6f}"
+                )
+                print(f"    metrics source CSV: {summary_csv_path}")
+            print("    cleanup complete")
 
         real_metrics = baseline_metrics_map[treatment]
         cate_metrics = compute_permutation_metrics(
@@ -624,6 +639,7 @@ def run_outcome_permutation_experiment(
         ) as temp_dir:
             temp_physionet_pkl_path = os.path.join(temp_dir, "processed_outcome_permuted.pkl")
             temp_output_dir = os.path.join(temp_dir, "cate_run")
+            print(f"    temp shuffled pickle: {temp_physionet_pkl_path}")
 
             shuffle_outcome_column(
                 physionet_pkl_path=physionet_pkl_path,
@@ -631,7 +647,7 @@ def run_outcome_permutation_experiment(
                 rng=rng,
             )
 
-            trial_summary_df, _ = run_cate_estimation_once(
+            trial_summary_df, summary_csv_path = run_cate_estimation_once(
                 latent_tags_path=latent_tags_path,
                 physionet_pkl_path=temp_physionet_pkl_path,
                 graph_pkl_path=graph_pkl_path,
@@ -651,6 +667,8 @@ def run_outcome_permutation_experiment(
                 permuted_values_by_treatment[treatment]["mean_normalized_cate"].append(
                     float(trial_metrics_map[treatment]["mean_normalized_cate"])
                 )
+            print(f"    metrics source CSV: {summary_csv_path}")
+        print("    cleanup complete")
 
     results: List[Dict[str, object]] = []
     for treatment in baseline_treatments:
@@ -734,6 +752,13 @@ def main() -> None:
         )
 
     os.makedirs(experiment_dir, exist_ok=True)
+    print("=== Starting permutation sanity checks ===")
+    print(
+        "Runtime configuration: "
+        f"model={DATASET_MODEL} | trials={trials} | model_type={model_type} | seed={seed} | "
+        f"latent_tags_path={latent_tags_path} | processed_pkl_path={physionet_pkl_path} | "
+        f"graph_pkl_path={graph_pkl_path} | experiment_dir={experiment_dir}"
+    )
 
     print("Running baseline cate_estimation.py on original inputs...")
     with tempfile.TemporaryDirectory(
@@ -754,6 +779,10 @@ def main() -> None:
             baseline_summary_df,
             context=f"baseline summary from {baseline_summary_csv}",
             expected_treatments=baseline_treatments,
+        )
+        print(
+            f"Baseline completed: treatments={len(baseline_treatments)} | "
+            f"summary_csv={baseline_summary_csv}"
         )
 
     print("Running treatment permutation tests...")
