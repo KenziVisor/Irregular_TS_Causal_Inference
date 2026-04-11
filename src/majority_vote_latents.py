@@ -13,7 +13,7 @@ DEFAULT_OUTPUT_PATH = Path("./latent_tags_majority_vote.csv")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build one majority-vote latent CSV from a folder of aligned latent-tag voter CSV files."
+            "Build one majority-vote latent CSV from a folder of latent-tag voter CSV files."
         )
     )
     parser.add_argument(
@@ -161,7 +161,6 @@ def validate_reference_dataframe(
 def validate_against_reference(
     df: pd.DataFrame,
     file_path: Path,
-    reference_df: pd.DataFrame,
     reference_file_path: Path,
     reference_latent_columns: Sequence[str],
 ) -> pd.DataFrame:
@@ -181,27 +180,49 @@ def validate_against_reference(
         )
 
     validated_df = coerce_binary_latent_columns(df, file_path, current_latent_columns)
+    return validated_df.loc[:, ["ts_id", *reference_latent_columns]].copy()
 
-    if len(validated_df) != len(reference_df):
+
+def align_voters_on_shared_ts_ids(
+    voter_dfs: Sequence[pd.DataFrame],
+    voter_file_paths: Sequence[Path],
+    latent_columns: Sequence[str],
+) -> tuple[list[pd.DataFrame], list[str], list[int]]:
+    if not voter_dfs:
+        raise ValueError("No validated voter dataframes were provided for alignment.")
+
+    latent_columns = list(latent_columns)
+    shared_ts_ids = set(voter_dfs[0]["ts_id"])
+    for voter_df in voter_dfs[1:]:
+        shared_ts_ids &= set(voter_df["ts_id"])
+
+    if not shared_ts_ids:
+        row_count_details = "; ".join(
+            f"{file_path}={len(voter_df):,} rows"
+            for file_path, voter_df in zip(voter_file_paths, voter_dfs)
+        )
         raise ValueError(
-            f"Row-count mismatch in file {file_path}. "
-            f"Reference rows={len(reference_df):,}, current rows={len(validated_df):,}."
+            f"No shared ts_id values remain after intersecting {len(voter_dfs)} voter CSV files. "
+            f"Row counts by file: {row_count_details}"
         )
 
-    reference_ts_ids = reference_df["ts_id"].tolist()
-    current_ts_ids = validated_df["ts_id"].tolist()
-    for row_index, (reference_ts_id, current_ts_id) in enumerate(
-        zip(reference_ts_ids, current_ts_ids),
-        start=1,
-    ):
-        if reference_ts_id != current_ts_id:
-            raise ValueError(
-                f"ts_id sequence mismatch in file {file_path}. "
-                f"First mismatched data row={row_index}. "
-                f"Reference ts_id={reference_ts_id!r}, current ts_id={current_ts_id!r}."
-            )
+    reference_df = voter_dfs[0]
+    final_ts_ids = [ts_id for ts_id in reference_df["ts_id"] if ts_id in shared_ts_ids]
 
-    return validated_df.loc[:, ["ts_id", *reference_latent_columns]].copy()
+    aligned_voter_dfs: list[pd.DataFrame] = []
+    dropped_rows_per_voter: list[int] = []
+    for voter_df in voter_dfs:
+        aligned_voter_df = (
+            voter_df.set_index("ts_id")
+            .loc[final_ts_ids, latent_columns]
+            .reset_index()
+        )
+        aligned_voter_dfs.append(
+            aligned_voter_df.loc[:, ["ts_id", *latent_columns]].copy()
+        )
+        dropped_rows_per_voter.append(len(voter_df) - len(aligned_voter_df))
+
+    return aligned_voter_dfs, final_ts_ids, dropped_rows_per_voter
 
 
 def build_majority_vote_dataframe(
@@ -236,39 +257,72 @@ def main() -> None:
     print(f"Found {len(csv_files)} candidate CSV files")
 
     reference_file = csv_files[0]
-    print(f"[2/5] Loading reference file: {reference_file}")
+    print(f"[2/5] Loading and validating reference file: {reference_file}")
     reference_df = load_latent_csv(reference_file)
     reference_df, reference_latent_columns = validate_reference_dataframe(
         reference_df,
         reference_file,
     )
     print(
-        f"Reference rows: {len(reference_df):,} | "
+        f"Reference rows before alignment: {len(reference_df):,} | "
         f"latent columns: {len(reference_latent_columns)}"
     )
 
-    voter_dfs: list[pd.DataFrame] = [reference_df.loc[:, ["ts_id", *reference_latent_columns]].copy()]
+    voter_dfs: list[pd.DataFrame] = [
+        reference_df.loc[:, ["ts_id", *reference_latent_columns]].copy()
+    ]
+    voter_files: list[Path] = [reference_file]
 
-    print("[3/5] Validating remaining voter files")
+    print("[3/5] Loading and validating remaining voter files")
     if len(csv_files) == 1:
-        print(f"Only one voter CSV found: {reference_file}")
+        print(
+            f"Only one voter CSV found: {reference_file} | "
+            f"rows before alignment: {len(reference_df):,}"
+        )
     else:
         for voter_index, voter_file in enumerate(csv_files[1:], start=2):
-            print(f"Validating voter {voter_index}/{len(csv_files)}: {voter_file}")
             voter_df = load_latent_csv(voter_file)
-            aligned_voter_df = validate_against_reference(
+            validated_voter_df = validate_against_reference(
                 voter_df,
                 voter_file,
-                reference_df,
                 reference_file,
                 reference_latent_columns,
             )
-            voter_dfs.append(aligned_voter_df)
-            print(f"Validation passed for: {voter_file}")
+            voter_dfs.append(validated_voter_df)
+            voter_files.append(voter_file)
+            print(
+                f"Validated voter {voter_index}/{len(csv_files)}: {voter_file} | "
+                f"rows before alignment: {len(validated_voter_df):,}"
+            )
 
-    print("[4/5] Computing majority vote")
+    print("[4/5] Aligning voters on shared ts_id intersection")
+    aligned_voter_dfs, final_ts_ids, dropped_rows_per_voter = align_voters_on_shared_ts_ids(
+        voter_dfs=voter_dfs,
+        voter_file_paths=voter_files,
+        latent_columns=reference_latent_columns,
+    )
     print(
-        f"Voting across {len(voter_dfs)} files, {len(reference_df):,} patients, "
+        f"Shared ts_id intersection across {len(aligned_voter_dfs)} voters: "
+        f"{len(final_ts_ids):,}"
+    )
+    print(
+        f"Dropped {dropped_rows_per_voter[0]:,} reference-only rows not shared by all voters"
+    )
+    for voter_index, (voter_file, dropped_rows) in enumerate(
+        zip(voter_files[1:], dropped_rows_per_voter[1:]),
+        start=2,
+    ):
+        print(
+            f"Dropped {dropped_rows:,} rows from voter {voter_index}/{len(voter_files)} "
+            f"during alignment: {voter_file}"
+        )
+
+    reference_df = aligned_voter_dfs[0]
+    voter_dfs = aligned_voter_dfs
+
+    print("[5/5] Computing and saving majority vote")
+    print(
+        f"Voting across {len(voter_dfs)} files, {len(reference_df):,} shared patients, "
         f"{len(reference_latent_columns)} latent columns"
     )
     output_df = build_majority_vote_dataframe(
@@ -277,7 +331,7 @@ def main() -> None:
         latent_columns=reference_latent_columns,
     )
 
-    print(f"[5/5] Saving output to: {output_path}")
+    print(f"Saving output to: {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_df.to_csv(output_path, index=False)
     print(f"Saved majority-vote latent CSV: {output_path}")
