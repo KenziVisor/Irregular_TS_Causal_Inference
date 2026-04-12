@@ -13,10 +13,10 @@ The current workflow is centered on patient-level ICU time-series processing and
 A typical local setup is:
 
 ```bash
-git clone <repo-url>
-cd <repo-folder>
-conda create -n <env-name> python=3.10 -y
-conda activate <env-name>
+git clone https://github.com/KenziVisor/causal-irregular-time-series.git
+cd causal-irregular-time-series/
+conda create -n causal-ts-env python=3.10 -y
+conda activate causal-ts-env
 pip install -r requirements.txt
 ```
 
