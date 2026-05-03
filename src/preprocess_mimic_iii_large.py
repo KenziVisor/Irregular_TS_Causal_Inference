@@ -1,8 +1,22 @@
+import argparse
+import sys
+from pathlib import Path
+
+if "--validate-config-only" in sys.argv:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dataset_config import maybe_run_validate_config_only
+
+    maybe_run_validate_config_only(
+        "src/preprocess_mimic_iii_large.py",
+        fixed_dataset="mimic",
+    )
+
 import pandas as pd
 from tqdm import tqdm
 import numpy as np
 import os
 
+from dataset_config import get_config_int, get_config_scalar, get_first_available, load_dataset_config
 from preprocess_mimic_iii_large_contract import (
     assert_physionet_compatible_output,
     build_canonical_oc,
@@ -15,6 +29,34 @@ from preprocess_mimic_iii_large_contract import (
 RAW_DATA_PATH = '../mimiciii'
 OUTPUT_PATH = '../data/processed/mimic_iii_ts_oc_ids.pkl'
 TOTAL_STAGES = 10
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Preprocess raw MIMIC-III ICU files.")
+    parser.add_argument("--dataset-config-csv", default=None)
+    parser.add_argument("--raw-data-path", default=None)
+    parser.add_argument("--output-path", default=None)
+    parser.add_argument(
+        "--validate-config-only",
+        action="store_true",
+        help="Resolve dataset config values and exit without loading data.",
+    )
+    return parser.parse_args()
+
+
+_ARGS = parse_args()
+_CONFIG = load_dataset_config("mimic", _ARGS.dataset_config_csv)
+RAW_DATA_PATH = _ARGS.raw_data_path or str(
+    get_first_available(
+        _CONFIG,
+        ["PREPROCESS_RAW_DATA_PATH", "RAW_DATA_PATH"],
+        RAW_DATA_PATH,
+    )
+)
+OUTPUT_PATH = _ARGS.output_path or str(
+    get_config_scalar(_CONFIG, "PREPROCESS_OUTPUT_PATH", OUTPUT_PATH)
+)
+TOTAL_STAGES = int(get_config_int(_CONFIG, "TOTAL_STAGES", TOTAL_STAGES) or TOTAL_STAGES)
 
 
 def log_stage(step: int, message: str) -> None:
@@ -874,7 +916,7 @@ assert_physionet_compatible_output(ts, oc, ts_ids)
 
 # Stage 5: serialize the final PhysioNet-compatible payload.
 log_stage(10, "Validating and saving the processed MIMIC artifact")
-os.makedirs('../data/processed', exist_ok=True)
+os.makedirs(os.path.dirname(OUTPUT_PATH) or ".", exist_ok=True)
 serialize_processed_output(ts, oc, ts_ids, OUTPUT_PATH)
 print(
     f"Saved processed MIMIC artifact to: {os.path.abspath(OUTPUT_PATH)} | "

@@ -9,8 +9,23 @@ import sys
 import tempfile
 from typing import Dict, Iterable, List, Sequence, Tuple
 
+if "--validate-config-only" in sys.argv:
+    from dataset_config import maybe_run_validate_config_only
+
+    maybe_run_validate_config_only(
+        "src/permutations_test.py",
+        default_dataset="physionet",
+    )
+
 import numpy as np
 import pandas as pd
+from dataset_config import (
+    get_config_float,
+    get_config_int,
+    get_config_scalar,
+    get_first_available,
+    load_dataset_config,
+)
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -75,6 +90,14 @@ def parse_args() -> argparse.Namespace:
         help=f"Dataset selector for path defaults. Default: {DATASET_MODEL}",
     )
     parser.add_argument(
+        "--dataset-config-csv",
+        default=None,
+        help=(
+            "Path to the dataset global-variables CSV. If omitted, use the default "
+            "config for --model."
+        ),
+    )
+    parser.add_argument(
         "--trials",
         type=int,
         default=None,
@@ -130,23 +153,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=f"Base seed for deterministic shuffling. Default: use SEED ({SEED}).",
     )
+    parser.add_argument(
+        "--validate-config-only",
+        action="store_true",
+        help="Resolve dataset config values and exit without loading data.",
+    )
     return parser.parse_args()
-
-
-def get_dataset_defaults(model: str) -> Dict[str, str | None]:
-    if model == "physionet":
-        return {
-            "latent_tags_path": LATENT_TAGS_PATH,
-            "physionet_pkl_path": PHYSIONET_PKL_PATH,
-            "graph_pkl_path": GRAPH_PKL_PATH,
-        }
-    if model == "mimic":
-        return {
-            "latent_tags_path": "mimiciii_latent_tags_output/latent_tags.csv",
-            "physionet_pkl_path": "../data/processed/mimic_iii_ts_oc_ids.pkl",
-            "graph_pkl_path": None,
-        }
-    raise ValueError(f"Unsupported model: {model!r}")
 
 
 def resolve_runtime_path(
@@ -307,12 +319,15 @@ def run_cate_estimation_once(
     graph_pkl_path: str,
     output_dir: str,
     model_type: str,
+    dataset_config_csv: str,
 ) -> Tuple[pd.DataFrame, str]:
     os.makedirs(output_dir, exist_ok=True)
 
     cmd = [
         sys.executable,
         CATE_ESTIMATION_SCRIPT_PATH,
+        "--dataset-config-csv",
+        dataset_config_csv,
         "--latent-tags-path",
         latent_tags_path,
         "--physionet-pkl-path",
@@ -513,6 +528,7 @@ def run_treatment_permutation_experiment(
     physionet_pkl_path: str,
     graph_pkl_path: str,
     model_type: str,
+    dataset_config_csv: str,
     seed: int,
     baseline_metrics_map: Dict[str, Dict[str, float | str]],
     baseline_treatments: Sequence[str],
@@ -560,6 +576,7 @@ def run_treatment_permutation_experiment(
                     graph_pkl_path=graph_pkl_path,
                     output_dir=temp_output_dir,
                     model_type=model_type,
+                    dataset_config_csv=dataset_config_csv,
                 )
                 trial_metrics_map = build_treatment_metrics_map(
                     trial_summary_df,
@@ -616,6 +633,7 @@ def run_outcome_permutation_experiment(
     physionet_pkl_path: str,
     graph_pkl_path: str,
     model_type: str,
+    dataset_config_csv: str,
     seed: int,
     baseline_metrics_map: Dict[str, Dict[str, float | str]],
     baseline_treatments: Sequence[str],
@@ -653,6 +671,7 @@ def run_outcome_permutation_experiment(
                 graph_pkl_path=graph_pkl_path,
                 output_dir=temp_output_dir,
                 model_type=model_type,
+                dataset_config_csv=dataset_config_csv,
             )
             trial_metrics_map = build_treatment_metrics_map(
                 trial_summary_df,
@@ -702,49 +721,71 @@ def run_outcome_permutation_experiment(
 
 def main() -> None:
     global DATASET_MODEL
+    global OUTCOME_COL
+    global EPSILON
     args = parse_args()
     DATASET_MODEL = args.model
-    dataset_defaults = get_dataset_defaults(DATASET_MODEL)
+    config = load_dataset_config(DATASET_MODEL, args.dataset_config_csv)
+    dataset_config_csv = str(config["__config_csv_path__"])
 
-    trials = resolve_runtime_int(args.trials, TRIALS, "TRIALS", minimum=1)
+    OUTCOME_COL = str(get_config_scalar(config, "OUTCOME_COL", OUTCOME_COL))
+    EPSILON = float(get_config_float(config, "EPSILON", EPSILON) or EPSILON)
+
+    trials = resolve_runtime_int(
+        args.trials,
+        get_config_int(config, "TRIALS", TRIALS),
+        "TRIALS",
+        minimum=1,
+    )
+    experiment_dir_default = get_first_available(
+        config,
+        ["EXPERIMENT_DIR"],
+        EXPERIMENT_DIR,
+    )
     experiment_dir = resolve_runtime_path(
         args.experiment_dir,
-        EXPERIMENT_DIR,
+        str(experiment_dir_default),
         "EXPERIMENT_DIR",
         must_exist=False,
     )
-    if DATASET_MODEL == "mimic" and args.graph_pkl_path is None:
-        raise ValueError(
-            "MIMIC mode requires --graph-pkl-path because this repo does not define "
-            "a relative default MIMIC graph pickle path."
-        )
-    if DATASET_MODEL == "mimic" and args.experiment_dir is None:
-        raise ValueError(
-            "MIMIC mode requires --experiment-dir because this repo does not define "
-            "a safe default MIMIC experiment directory and the PhysioNet default would collide."
-        )
+    latent_tags_default = get_first_available(
+        config,
+        ["PERMUTATIONS_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
+        LATENT_TAGS_PATH,
+    )
+    physionet_pkl_default = get_first_available(
+        config,
+        ["PERMUTATIONS_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
+        PHYSIONET_PKL_PATH,
+    )
+    graph_pkl_default = get_first_available(config, ["GRAPH_PKL_PATH"], GRAPH_PKL_PATH)
     latent_tags_path = resolve_runtime_path(
         args.latent_tags_path,
-        dataset_defaults["latent_tags_path"],
+        str(latent_tags_default),
         "LATENT_TAGS_PATH",
     )
     physionet_pkl_path = resolve_runtime_path(
         args.physionet_pkl_path,
-        dataset_defaults["physionet_pkl_path"],
+        str(physionet_pkl_default),
         "PHYSIONET_PKL_PATH",
     )
     graph_pkl_path = resolve_runtime_path(
         args.graph_pkl_path,
-        dataset_defaults["graph_pkl_path"],
+        graph_pkl_default,
         "GRAPH_PKL_PATH",
     )
     model_type = resolve_runtime_choice(
         args.model_type,
-        MODEL_TYPE,
+        str(get_config_scalar(config, "MODEL_TYPE", MODEL_TYPE)),
         "MODEL_TYPE",
         valid_values=["LinearDML", "CausalForest"],
     )
-    seed = resolve_runtime_int(args.seed, SEED, "SEED", minimum=0)
+    seed = resolve_runtime_int(
+        args.seed,
+        get_config_int(config, "SEED", SEED),
+        "SEED",
+        minimum=0,
+    )
 
     if not os.path.isfile(CATE_ESTIMATION_SCRIPT_PATH):
         raise FileNotFoundError(
@@ -772,6 +813,7 @@ def main() -> None:
             graph_pkl_path=graph_pkl_path,
             output_dir=baseline_output_dir,
             model_type=model_type,
+            dataset_config_csv=dataset_config_csv,
         )
 
         baseline_treatments = baseline_summary_df["treatment"].astype(str).tolist()
@@ -793,6 +835,7 @@ def main() -> None:
         physionet_pkl_path=physionet_pkl_path,
         graph_pkl_path=graph_pkl_path,
         model_type=model_type,
+        dataset_config_csv=dataset_config_csv,
         seed=seed,
         baseline_metrics_map=baseline_metrics_map,
         baseline_treatments=baseline_treatments,
@@ -806,6 +849,7 @@ def main() -> None:
         physionet_pkl_path=physionet_pkl_path,
         graph_pkl_path=graph_pkl_path,
         model_type=model_type,
+        dataset_config_csv=dataset_config_csv,
         seed=seed,
         baseline_metrics_map=baseline_metrics_map,
         baseline_treatments=baseline_treatments,

@@ -2,7 +2,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+if "--validate-config-only" in sys.argv:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dataset_config import maybe_run_validate_config_only
+
+    maybe_run_validate_config_only(
+        "src/split_predicted_latent_tags.py",
+        default_dataset="physionet",
+    )
+
+from dataset_config import get_first_available, load_dataset_config
 
 
 DATASET_MODEL = "physionet"
@@ -19,7 +31,20 @@ def parse_args() -> argparse.Namespace:
         default=DATASET_MODEL,
         help=f"Dataset selector for input defaults. Default: {DATASET_MODEL}",
     )
+    parser.add_argument(
+        "--dataset-config-csv",
+        default=None,
+        help=(
+            "Path to the dataset global-variables CSV. If omitted, use the default "
+            "config for --model."
+        ),
+    )
     parser.add_argument("--input-csv", default=None)
+    parser.add_argument(
+        "--validate-config-only",
+        action="store_true",
+        help="Resolve dataset config values and exit without loading data.",
+    )
     return parser.parse_args()
 
 
@@ -97,13 +122,20 @@ def split_predicted_latent_tags(
 
 def main() -> None:
     args = parse_args()
-    if args.input_csv is None:
+    config = load_dataset_config(args.model, args.dataset_config_csv)
+    input_default = get_first_available(
+        config,
+        ["SPLIT_INPUT_CSV", "INPUT_CSV"],
+        str(INPUT_CSV),
+    )
+    input_csv_value = args.input_csv if args.input_csv is not None else input_default
+    if input_csv_value is None:
         raise ValueError(
             "Provide --input-csv because this repo does not define a safe checked-in "
             "default combined predicted-latents CSV."
         )
 
-    input_csv = Path(args.input_csv)
+    input_csv = Path(str(input_csv_value))
 
     if not input_csv.exists():
         raise FileNotFoundError(f"Input CSV not found: {input_csv}")

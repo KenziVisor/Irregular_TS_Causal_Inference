@@ -1,8 +1,29 @@
+import argparse
 import pickle
+import sys
+from pathlib import Path
+
+if "--validate-config-only" in sys.argv:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dataset_config import maybe_run_validate_config_only
+
+    maybe_run_validate_config_only(
+        "src/tagging_latent_variables_physionet.py",
+        fixed_dataset="physionet",
+    )
+
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
 from functools import partial
+
+from dataset_config import (
+    get_config_bool,
+    get_config_list,
+    get_config_scalar,
+    load_dataset_config,
+    resolve_with_precedence,
+)
 
 
 pkl_path = "../../data/processed/physionet2012_ts_oc_ids.pkl"
@@ -10,6 +31,78 @@ output_csv_path = "latent_tags_optimized.csv"
 
 OPTIMIZED = True
 THRESHOLDS_PATH = "../../data/optimal_thresholds.txt"
+DEFAULT_THRESHOLDS = {
+    "severity_map": 70,
+    "severity_sysabp": 100,
+    "severity_gcs": 15,
+    "severity_resprate": 22,
+    "severity_sao2": 92,
+    "severity_lact": 2.0,
+    "severity_ph": 7.30,
+    "severity_hco3": 18,
+    "severity_creat": 2.0,
+    "severity_min_count": 2,
+    "shock_map": 65,
+    "shock_sysabp": 90,
+    "shock_lact": 2.0,
+    "shock_urine_sum": 500,
+    "resp_pf": 300,
+    "resp_sao2": 90,
+    "renal_creat": 2.0,
+    "renal_bun": 40,
+    "renal_urine_sum": 500,
+    "hep_bili": 2.0,
+    "hep_ast": 100,
+    "hep_alt": 100,
+    "heme_plts": 100,
+    "heme_hct": 30,
+    "inflam_wbc_hi": 12,
+    "inflam_wbc_lo": 4,
+    "inflam_temp_hi": 38.3,
+    "inflam_temp_lo": 36,
+    "neuro_gcs": 13,
+    "card_tropi": 0.4,
+    "card_tropt": 0.1,
+    "metab_ph_lo": 7.30,
+    "metab_ph_hi": 7.50,
+    "metab_glu_lo": 70,
+    "metab_glu_hi": 180,
+    "metab_hco3_lo": 18,
+    "chronic_age": 65,
+    "acute_lact": 2.0,
+    "acute_map": 65,
+    "acute_gcs": 13,
+}
+LATENT_ORDER = [
+    "Severity", "Shock", "RespFail", "RenalFail", "HepFail", "HemeFail",
+    "Inflam", "NeuroFail", "CardInj", "Metab", "ChronicRisk", "AcuteInsult",
+]
+
+
+def str_to_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value!r}.")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Apply rule-based PhysioNet latent variable tags."
+    )
+    parser.add_argument("--dataset-config-csv", default=None)
+    parser.add_argument("--pkl-path", default=None)
+    parser.add_argument("--output-csv-path", default=None)
+    parser.add_argument("--optimized", type=str_to_bool, default=None)
+    parser.add_argument("--thresholds-path", default=None)
+    parser.add_argument(
+        "--validate-config-only",
+        action="store_true",
+        help="Resolve dataset config values and exit without loading data.",
+    )
+    return parser.parse_args()
 
 # ============================================================
 # 1. LOAD DATA
@@ -251,7 +344,7 @@ def get_latent_decision_trees(thr=None):
     """
     print("[4/5] Initializing latent decision trees...")
 
-    trees = {
+    all_trees = {
         "Severity": partial(tag_severity, thr=thr),
         "Shock": partial(tag_shock, thr=thr),
         "RespFail": partial(tag_respfail, thr=thr),
@@ -265,6 +358,7 @@ def get_latent_decision_trees(thr=None):
         "ChronicRisk": partial(tag_chronicrisk, thr=thr),
         "AcuteInsult": partial(tag_acuteinsult, thr=thr),
     }
+    trees = {latent: all_trees[latent] for latent in LATENT_ORDER if latent in all_trees}
 
     print(f"      Loaded {len(trees)} latent definitions")
     return trees
@@ -315,7 +409,7 @@ def run_latent_tagging_pipeline(pkl_path, output_csv_path):
         thr = load_optimal_thresholds(THRESHOLDS_PATH)
     else:
         print("[INFO] Using default thresholds")
-        thr = None
+        thr = dict(DEFAULT_THRESHOLDS)
 
     decision_trees = get_latent_decision_trees(thr)
 
@@ -330,13 +424,51 @@ def run_latent_tagging_pipeline(pkl_path, output_csv_path):
     return latent_tags_df, decision_trees
 
 
-latent_tags_df, decision_trees = run_latent_tagging_pipeline(pkl_path, output_csv_path)
-print(latent_tags_df.head())
+def main():
+    global pkl_path
+    global output_csv_path
+    global OPTIMIZED
+    global THRESHOLDS_PATH
+    global DEFAULT_THRESHOLDS
+    global LATENT_ORDER
+
+    args = parse_args()
+    config = load_dataset_config("physionet", args.dataset_config_csv)
+    pkl_path = str(get_config_scalar(config, "TAGGING_PKL_PATH", pkl_path))
+    output_csv_path = str(
+        get_config_scalar(config, "TAGGING_OUTPUT_CSV_PATH", output_csv_path)
+    )
+    THRESHOLDS_PATH = str(get_config_scalar(config, "THRESHOLDS_PATH", THRESHOLDS_PATH))
+    DEFAULT_THRESHOLDS = dict(
+        get_config_scalar(config, "DEFAULT_THRESHOLDS", DEFAULT_THRESHOLDS)
+    )
+    LATENT_ORDER = list(get_config_list(config, "LATENT_ORDER", LATENT_ORDER) or [])
+    OPTIMIZED = bool(
+        resolve_with_precedence(
+            args.optimized,
+            config,
+            "OPTIMIZED",
+            get_config_bool(config, "OPTIMIZED", OPTIMIZED),
+        )
+    )
+
+    if args.pkl_path is not None:
+        pkl_path = args.pkl_path
+    if args.output_csv_path is not None:
+        output_csv_path = args.output_csv_path
+    if args.thresholds_path is not None:
+        THRESHOLDS_PATH = args.thresholds_path
+
+    latent_tags_df, decision_trees = run_latent_tagging_pipeline(pkl_path, output_csv_path)
+    print(latent_tags_df.head())
+
+    trees_path = output_csv_path.replace(".csv", "_trees.pkl")
+    with open(trees_path, "wb") as f:
+        pickle.dump(decision_trees, f)
+
+    print(f"Decision trees dictionary saved to: {trees_path}")
 
 
-# Save decision trees dictionary
-with open(output_csv_path.replace(".csv", "_trees.pkl"), "wb") as f:
-    pickle.dump(decision_trees, f)
-
-print(f"Decision trees dictionary saved to: {output_csv_path.replace('.csv', '_trees.pkl')}")
+if __name__ == "__main__":
+    main()
 

@@ -1,0 +1,106 @@
+Global Variables CSV Parameters
+===============================
+
+These notes describe the dataset config CSVs:
+
+- configs/physionet-global-variables.csv
+- configs/mimic-global-variables.csv
+
+CSV format
+----------
+
+- One column is one global/config variable.
+- A scalar value is read from the first non-empty cell in that column.
+- A list is represented by vertical values in the same column.
+- A dict or nested config is represented as a JSON string in the first non-empty cell.
+- CLI arguments override CSV values when a script supports both.
+
+Runtime and path parameters
+---------------------------
+
+These values choose input files, output folders, and artifact locations. Common examples:
+
+- LATENT_TAGS_PATH: default latent-tag CSV path.
+- PHYSIONET_PKL_PATH / DATASET_PKL_PATH: processed `[ts, oc, ts_ids]` pickle path.
+- GRAPH_PKL_PATH: saved causal graph pickle path.
+- OUTPUT_DIR: default output directory for a script or run.
+- CATE_RESULTS_DIR: existing CATE artifact root used by analysis scripts.
+- EXPERIMENT_DIR: run-specific experiment output root.
+- RESULTS_TXT_PATH: text report output path.
+
+Duplicate-minimization rule
+---------------------------
+
+Use canonical keys when several scripts share the same value. For example, keep
+one LATENT_TAGS_PATH when CATE, mortality, analysis, and permutations all use
+the same latent-tag CSV.
+
+Use script-specific keys only when a script genuinely needs a different default.
+For example, PhysioNet keeps MATCHING_LATENT_TAGS_PATH because matching still
+defaults to the older latent_tags.csv path while the other downstream scripts
+use the predicted absolute-tags CSV.
+
+Scripts resolve aliases internally, so the CSV does not need duplicate columns
+such as CATE_LATENT_TAGS_PATH, MORTALITY_LATENT_TAGS_PATH, or CATE_PKL_PATH when
+those values are identical to the canonical LATENT_TAGS_PATH or
+PHYSIONET_PKL_PATH.
+
+CLI values always override CSV values. CSV values override the script's legacy
+fallback constants.
+
+Intentional same-value exceptions should stay rare and documented. The graph
+keys are the main accepted case: GRAPH_PKL_PATH is the downstream graph input,
+while DEFAULT_GRAPH_PKL_PATH / DEFAULT_GRAPH_PNG_PATH are the graph-builder
+artifact defaults and may match in datasets whose historical paths already
+align.
+
+Dataset and causal parameters
+-----------------------------
+
+These values configure dataset names, column names, and the node/feature names used by the scripts:
+
+- DATASET_MODEL: dataset selector such as `physionet` or `mimic`.
+- TREATMENTS: latent treatment columns to evaluate.
+- LATENT_ORDER: expected latent-state column order.
+- BACKGROUND_FEATURE_COLUMNS: baseline covariates loaded from the processed time series.
+- EFFECT_MODIFIER_COLUMNS: features passed as CATE effect modifiers.
+- OUTCOME_COL: outcome column in the dataframe.
+- GRAPH_OUTCOME_NODE: corresponding outcome node name in the DAG.
+
+Estimation parameters
+---------------------
+
+These values control model choice and estimation defaults:
+
+- MODEL_TYPE: estimator family, for example `CausalForest` or `LinearDML`.
+- SEED: random seed for reproducible splits, models, and permutations.
+- DOWN_SAMPLE: whether to down-sample outcomes where supported.
+- USE_EXPANDED_SAFE_CONFOUNDERS: whether to use the expanded DAG-safe confounder filter.
+- DEFAULT_SENSITIVITY_ALPHA: default alpha for sensitivity intervals.
+
+Matching and permutation parameters
+-----------------------------------
+
+These values tune matched-pair summaries and permutation checks:
+
+- MAX_DIST: maximum Hamming distance allowed for a matched pair.
+- MIN_MATCHED_PAIRS: minimum matched-pair count required for reporting.
+- MIN_MATCH_RATE: minimum treated-unit match rate.
+- MATCH_WITH_REPLACEMENT: whether controls can be reused.
+- TRIALS: number of permutation trials.
+
+Tagging and preprocessing parameters
+------------------------------------
+
+These values configure preprocessing paths and latent-tagging thresholds where the scripts support them:
+
+- DEFAULT_THRESHOLDS: JSON dict of rule thresholds.
+- THRESHOLDS_PATH: path to optimized threshold values for older taggers.
+- OPTIMIZED: whether to load optimized thresholds where supported.
+- PREPROCESS_RAW_DATA_PATH: raw dataset input root.
+- PREPROCESS_OUTPUT_PATH: processed pickle output path.
+
+Warning
+-------
+
+Do not edit scientific DAG edges or latent decision-rule logic through this file unless the code explicitly supports it. These CSVs configure names, paths, thresholds, and runtime defaults; they are not a replacement for the causal model code.

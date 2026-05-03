@@ -11,6 +11,15 @@ from collections import namedtuple
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
+if "--validate-config-only" in sys.argv:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dataset_config import maybe_run_validate_config_only
+
+    maybe_run_validate_config_only(
+        "src/analyze_cate_results.py",
+        default_dataset="physionet",
+    )
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -19,6 +28,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from econml.dml import CausalForestDML, LinearDML
+from dataset_config import (
+    get_config_bool,
+    get_config_float,
+    get_config_int,
+    get_config_list,
+    get_config_scalar,
+    get_first_available,
+    load_dataset_config,
+)
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
@@ -42,6 +60,10 @@ DEFAULT_SENSITIVITY_C_T = 0.05
 DEFAULT_SENSITIVITY_RHO = 1.0
 SENSITIVITY_GRID_STEPS = 21
 ALLOWED_TOP_K_VALUES = {1, 3}
+BACKGROUND_FEATURE_COLUMNS = [
+    "Age", "Gender", "Weight",
+    "ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4",
+]
 
 BENCHMARK_SCORE_COLUMNS = [
     "rank",
@@ -126,6 +148,14 @@ def parse_args() -> argparse.Namespace:
         default=DATASET_MODEL,
         help=f"Dataset selector for path defaults. Default: {DATASET_MODEL}",
     )
+    parser.add_argument(
+        "--dataset-config-csv",
+        default=None,
+        help=(
+            "Path to the dataset global-variables CSV. If omitted, use the default "
+            "config for --model."
+        ),
+    )
     parser.add_argument("--latent-tags-path", default=None)
     parser.add_argument("--physionet-pkl-path", default=None)
     parser.add_argument("--results-dir", default=None)
@@ -137,23 +167,12 @@ def parse_args() -> argparse.Namespace:
             "matching the current behavior."
         ),
     )
+    parser.add_argument(
+        "--validate-config-only",
+        action="store_true",
+        help="Resolve dataset config values and exit without loading data.",
+    )
     return parser.parse_args()
-
-
-def get_dataset_defaults(model: str) -> Dict[str, str | None]:
-    if model == "physionet":
-        return {
-            "latent_tags_path": LATENT_TAGS_PATH,
-            "physionet_pkl_path": PHYSIONET_PKL_PATH,
-            "results_dir": CATE_RESULTS_DIR,
-        }
-    if model == "mimic":
-        return {
-            "latent_tags_path": "mimiciii_latent_tags_output/latent_tags.csv",
-            "physionet_pkl_path": "../data/processed/mimic_iii_ts_oc_ids.pkl",
-            "results_dir": None,
-        }
-    raise ValueError(f"Unsupported model: {model!r}")
 
 
 def resolve_script_path(path_like: str | Path) -> Path:
@@ -279,19 +298,17 @@ def load_physionet_pickle(path: Path) -> Tuple[Any, Any, Any]:
 def build_background_features(
     ts: pd.DataFrame,
     dataset_model: str | None = None,
+    background_feature_columns: List[str] | None = None,
 ) -> pd.DataFrame:
     current_model = DATASET_MODEL if dataset_model is None else dataset_model
+    configured_columns = list(background_feature_columns or BACKGROUND_FEATURE_COLUMNS)
     df = ts.copy().sort_values(["ts_id", "minute"])
 
-    keep_vars = ["Age", "Gender", "Weight"]
     if current_model == "physionet":
-        keep_vars += ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]
+        keep_vars = list(configured_columns)
     else:
         available_variables = set(df["variable"].astype(str).tolist())
-        keep_vars += [
-            col for col in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]
-            if col in available_variables
-        ]
+        keep_vars = [col for col in configured_columns if col in available_variables]
     df = df[df["variable"].isin(keep_vars)].copy()
 
     first_vals = (
@@ -302,7 +319,7 @@ def build_background_features(
     bg = first_vals.pivot(index="ts_id", columns="variable", values="value").reset_index()
 
     if current_model == "physionet":
-        for col in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]:
+        for col in [c for c in configured_columns if c.startswith("ICUType_")]:
             if col not in bg.columns:
                 bg[col] = 0.0
 
@@ -338,7 +355,11 @@ def load_analysis_dataframe(
     oc_small = oc[["ts_id", OUTCOME_COL]].copy().drop_duplicates(subset=["ts_id"])
     oc_small["ts_id"] = oc_small["ts_id"].astype(str)
 
-    bg_df = build_background_features(ts, dataset_model=DATASET_MODEL)
+    bg_df = build_background_features(
+        ts,
+        dataset_model=DATASET_MODEL,
+        background_feature_columns=BACKGROUND_FEATURE_COLUMNS,
+    )
     bg_df["ts_id"] = bg_df["ts_id"].astype(str)
 
     latent_bg_overlap = [
@@ -2478,25 +2499,100 @@ def analyze_one_treatment(
 
 def main() -> None:
     global DATASET_MODEL
+    global LATENT_TAGS_PATH
+    global PHYSIONET_PKL_PATH
+    global CATE_RESULTS_DIR
+    global PREFERRED_ENV_NAME
+    global TOP_K_BENCHMARK_CONFOUNDERS
+    global SEED
+    global SAVE_CONTOUR_PLOT
+    global OUTCOME_COL
+    global DEFAULT_SENSITIVITY_ALPHA
+    global DEFAULT_SENSITIVITY_C_Y
+    global DEFAULT_SENSITIVITY_C_T
+    global DEFAULT_SENSITIVITY_RHO
+    global SENSITIVITY_GRID_STEPS
+    global ALLOWED_TOP_K_VALUES
+    global BACKGROUND_FEATURE_COLUMNS
     warnings.filterwarnings("ignore", category=FutureWarning)
-    np.random.seed(SEED)
     args = parse_args()
     DATASET_MODEL = args.model
-    dataset_defaults = get_dataset_defaults(DATASET_MODEL)
+    config = load_dataset_config(DATASET_MODEL, args.dataset_config_csv)
+
+    PREFERRED_ENV_NAME = str(
+        get_config_scalar(config, "PREFERRED_ENV_NAME", PREFERRED_ENV_NAME)
+    )
+    TOP_K_BENCHMARK_CONFOUNDERS = int(
+        get_config_int(
+            config,
+            "TOP_K_BENCHMARK_CONFOUNDERS",
+            TOP_K_BENCHMARK_CONFOUNDERS,
+        )
+        or TOP_K_BENCHMARK_CONFOUNDERS
+    )
+    SEED = int(get_config_int(config, "SEED", SEED) or SEED)
+    SAVE_CONTOUR_PLOT = bool(
+        get_config_bool(config, "SAVE_CONTOUR_PLOT", SAVE_CONTOUR_PLOT)
+    )
+    OUTCOME_COL = str(get_config_scalar(config, "OUTCOME_COL", OUTCOME_COL))
+    DEFAULT_SENSITIVITY_ALPHA = float(
+        get_config_float(config, "DEFAULT_SENSITIVITY_ALPHA", DEFAULT_SENSITIVITY_ALPHA)
+        or DEFAULT_SENSITIVITY_ALPHA
+    )
+    DEFAULT_SENSITIVITY_C_Y = float(
+        get_config_float(config, "DEFAULT_SENSITIVITY_C_Y", DEFAULT_SENSITIVITY_C_Y)
+        or DEFAULT_SENSITIVITY_C_Y
+    )
+    DEFAULT_SENSITIVITY_C_T = float(
+        get_config_float(config, "DEFAULT_SENSITIVITY_C_T", DEFAULT_SENSITIVITY_C_T)
+        or DEFAULT_SENSITIVITY_C_T
+    )
+    DEFAULT_SENSITIVITY_RHO = float(
+        get_config_float(config, "DEFAULT_SENSITIVITY_RHO", DEFAULT_SENSITIVITY_RHO)
+        or DEFAULT_SENSITIVITY_RHO
+    )
+    SENSITIVITY_GRID_STEPS = int(
+        get_config_int(config, "SENSITIVITY_GRID_STEPS", SENSITIVITY_GRID_STEPS)
+        or SENSITIVITY_GRID_STEPS
+    )
+    ALLOWED_TOP_K_VALUES = set(
+        int(value)
+        for value in (get_config_list(config, "ALLOWED_TOP_K_VALUES", list(ALLOWED_TOP_K_VALUES)) or [])
+    )
+    BACKGROUND_FEATURE_COLUMNS = list(
+        get_config_list(config, "BACKGROUND_FEATURE_COLUMNS", BACKGROUND_FEATURE_COLUMNS) or []
+    )
+    np.random.seed(SEED)
+
+    latent_tags_default = get_first_available(
+        config,
+        ["ANALYZE_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
+        LATENT_TAGS_PATH,
+    )
+    physionet_pkl_default = get_first_available(
+        config,
+        ["ANALYZE_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
+        PHYSIONET_PKL_PATH,
+    )
+    results_dir_default = get_first_available(
+        config,
+        ["CATE_RESULTS_DIR"],
+        CATE_RESULTS_DIR,
+    )
+    output_dir_default = get_first_available(
+        config,
+        ["ANALYZE_OUTPUT_DIR", "OUTPUT_DIR", "CATE_RESULTS_DIR"],
+        None,
+    )
 
     if TOP_K_BENCHMARK_CONFOUNDERS not in ALLOWED_TOP_K_VALUES:
         raise ValueError(
-            f"TOP_K_BENCHMARK_CONFOUNDERS must be 1 or 3. Found: {TOP_K_BENCHMARK_CONFOUNDERS}"
-        )
-
-    if DATASET_MODEL == "mimic" and args.results_dir is None:
-        raise ValueError(
-            "MIMIC mode requires --results-dir because this repo does not define "
-            "a relative default MIMIC results directory."
+            "TOP_K_BENCHMARK_CONFOUNDERS must be one of "
+            f"{sorted(ALLOWED_TOP_K_VALUES)}. Found: {TOP_K_BENCHMARK_CONFOUNDERS}"
         )
 
     results_dir = resolve_script_path(
-        args.results_dir if args.results_dir is not None else dataset_defaults["results_dir"]
+        args.results_dir if args.results_dir is not None else results_dir_default
     )
     if not results_dir.exists():
         raise FileNotFoundError(f"Results directory does not exist: {results_dir}")
@@ -2506,6 +2602,8 @@ def main() -> None:
     output_dir = results_dir
     if args.output_dir is not None:
         output_dir = resolve_script_path(args.output_dir)
+    elif output_dir_default is not None:
+        output_dir = resolve_script_path(output_dir_default)
     if output_dir.exists() and not output_dir.is_dir():
         raise NotADirectoryError(f"Output directory is not a directory: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -2513,12 +2611,12 @@ def main() -> None:
     latent_tags_path = resolve_script_path(
         args.latent_tags_path
         if args.latent_tags_path is not None
-        else dataset_defaults["latent_tags_path"]
+        else latent_tags_default
     )
     physionet_pkl_path = resolve_script_path(
         args.physionet_pkl_path
         if args.physionet_pkl_path is not None
-        else dataset_defaults["physionet_pkl_path"]
+        else physionet_pkl_default
     )
     print("=== Starting saved CATE analysis ===")
     print(

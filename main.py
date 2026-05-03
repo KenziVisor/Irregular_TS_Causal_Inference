@@ -13,6 +13,15 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.dataset_config import (
+    get_first_available,
+    get_config_int,
+    get_config_scalar,
+    load_dataset_config,
+    print_resolved_config_summary,
+    validate_script_config,
+)
+
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
@@ -59,6 +68,10 @@ class RunContext:
     logs_dir: Path
     stage_dirs: dict[str, Path]
     dataset: str
+    dataset_config_csv: Path
+    config: dict[str, object]
+    model_type: str
+    trials: int
     latent_tags_dir: Path
     dataset_pkl_path: Path
     stages: dict[str, StageRecord]
@@ -71,12 +84,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--latent-tags-dir",
-        required=True,
+        default=None,
         help="Directory containing the latent-tag voter CSV files.",
     )
     parser.add_argument(
         "--dataset-pkl-path",
-        required=True,
+        default=None,
         help="Path to the processed dataset pickle.",
     )
     parser.add_argument(
@@ -86,9 +99,22 @@ def parse_args() -> argparse.Namespace:
         help="Dataset identifier for graph selection and downstream script defaults.",
     )
     parser.add_argument(
+        "--dataset-config-csv",
+        default=None,
+        help=(
+            "Path to the dataset global-variables CSV. If omitted, use the default "
+            "config for --dataset."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         default=None,
         help="Root directory for the orchestrated run. Default: current working directory.",
+    )
+    parser.add_argument(
+        "--validate-config-only",
+        action="store_true",
+        help="Resolve dataset config values and child commands, then exit.",
     )
     return parser.parse_args()
 
@@ -142,6 +168,12 @@ def reset_stage_directory(path: Path) -> None:
 
 def build_run_context(args: argparse.Namespace) -> RunContext:
     repo_root = Path(__file__).resolve().parent
+    config = load_dataset_config(args.dataset, args.dataset_config_csv)
+    dataset_config_csv = Path(str(config["__config_csv_path__"])).resolve()
+    model_type = str(get_config_scalar(config, "MODEL_TYPE", "CausalForest"))
+    trials = get_config_int(config, "TRIALS", 10)
+    if trials is None:
+        trials = 10
     output_root = resolve_output_root(args.output_dir)
     logs_dir = output_root / "logs"
     stage_dirs = {
@@ -278,17 +310,64 @@ def build_run_context(args: argparse.Namespace) -> RunContext:
         ),
     }
 
+    if args.latent_tags_dir is None:
+        if args.validate_config_only:
+            latent_tags_dir = Path(".").resolve()
+        else:
+            raise ValueError("Provide --latent-tags-dir for a full pipeline run.")
+    else:
+        latent_tags_dir = Path(args.latent_tags_dir).expanduser().resolve()
+
+    dataset_pkl_value = args.dataset_pkl_path
+    if dataset_pkl_value is None and args.validate_config_only:
+        dataset_pkl_value = str(
+            get_first_available(
+                config,
+                ["DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
+                "dataset.pkl",
+            )
+        )
+    if dataset_pkl_value is None:
+        raise ValueError("Provide --dataset-pkl-path for a full pipeline run.")
+
     return RunContext(
         repo_root=repo_root,
         output_root=output_root,
         logs_dir=logs_dir,
         stage_dirs=stage_dirs,
         dataset=args.dataset,
-        latent_tags_dir=Path(args.latent_tags_dir).expanduser().resolve(),
-        dataset_pkl_path=Path(args.dataset_pkl_path).expanduser().resolve(),
+        dataset_config_csv=dataset_config_csv,
+        config=config,
+        model_type=model_type,
+        trials=trials,
+        latent_tags_dir=latent_tags_dir,
+        dataset_pkl_path=Path(dataset_pkl_value).expanduser().resolve(),
         stages=stages,
         summary_path=output_root / "run_summary.json",
     )
+
+
+def validate_config_only(args: argparse.Namespace, context: RunContext) -> None:
+    resolved = validate_script_config("main.py", context.config)
+    print_resolved_config_summary("main.py", context.config, resolved)
+
+    if args.latent_tags_dir is not None:
+        resolve_directory_path(str(context.latent_tags_dir), "latent-tags dir")
+    if args.dataset_pkl_path is not None:
+        resolve_file_path(str(context.dataset_pkl_path), "dataset pickle")
+
+    print("  child_commands:")
+    for stage_name, builder in [
+        ("graph", build_graph_command),
+        ("majority_vote", build_majority_vote_command),
+        ("mortality_prediction", build_mortality_command),
+        ("matching", build_matching_command),
+        ("cate_estimation", build_cate_command),
+        ("analyze_cate_results", build_analyze_command),
+        ("permutations_test", build_permutations_command),
+    ]:
+        command = builder(context)
+        print(f"    {stage_name}: {format_command(command)}")
 
 
 def prepare_output_directories(context: RunContext) -> None:
@@ -508,6 +587,8 @@ def build_graph_command(context: RunContext) -> list[str]:
     return [
         sys.executable,
         stage.script_path,
+        "--dataset-config-csv",
+        str(context.dataset_config_csv),
         "--graph-pkl-path",
         stage.output_paths["graph_pkl_path"],
         "--graph-png-path",
@@ -534,6 +615,8 @@ def build_mortality_command(context: RunContext) -> list[str]:
         stage.script_path,
         "--model",
         context.dataset,
+        "--dataset-config-csv",
+        str(context.dataset_config_csv),
         "--latent-tags-path",
         context.stages["majority_vote"].output_paths["majority_vote_csv"],
         "--physionet-pkl-path",
@@ -550,6 +633,8 @@ def build_matching_command(context: RunContext) -> list[str]:
         stage.script_path,
         "--model",
         context.dataset,
+        "--dataset-config-csv",
+        str(context.dataset_config_csv),
         "--latent-tags-path",
         context.stages["majority_vote"].output_paths["majority_vote_csv"],
         "--physionet-pkl-path",
@@ -568,6 +653,8 @@ def build_cate_command(context: RunContext) -> list[str]:
         stage.script_path,
         "--model",
         context.dataset,
+        "--dataset-config-csv",
+        str(context.dataset_config_csv),
         "--latent-tags-path",
         context.stages["majority_vote"].output_paths["majority_vote_csv"],
         "--physionet-pkl-path",
@@ -577,7 +664,7 @@ def build_cate_command(context: RunContext) -> list[str]:
         "--output-dir",
         stage.output_paths["output_dir"],
         "--model-type",
-        "CausalForest",
+        context.model_type,
     ]
 
 
@@ -588,6 +675,8 @@ def build_analyze_command(context: RunContext) -> list[str]:
         stage.script_path,
         "--model",
         context.dataset,
+        "--dataset-config-csv",
+        str(context.dataset_config_csv),
         "--latent-tags-path",
         context.stages["majority_vote"].output_paths["majority_vote_csv"],
         "--physionet-pkl-path",
@@ -606,8 +695,10 @@ def build_permutations_command(context: RunContext) -> list[str]:
         stage.script_path,
         "--model",
         context.dataset,
+        "--dataset-config-csv",
+        str(context.dataset_config_csv),
         "--trials",
-        "10",
+        str(context.trials),
         "--experiment-dir",
         stage.output_paths["output_dir"],
         "--latent-tags-path",
@@ -617,7 +708,7 @@ def build_permutations_command(context: RunContext) -> list[str]:
         "--graph-pkl-path",
         context.stages["graph"].output_paths["graph_pkl_path"],
         "--model-type",
-        "CausalForest",
+        context.model_type,
     ]
 
 
@@ -662,6 +753,7 @@ def write_run_summary(
         "repo_root": str(context.repo_root),
         "output_root": str(context.output_root),
         "dataset": context.dataset,
+        "dataset_config_csv": str(context.dataset_config_csv),
         "latent_tags_dir": str(context.latent_tags_dir),
         "dataset_pkl_path": str(context.dataset_pkl_path),
         "stages": {
@@ -823,7 +915,7 @@ def orchestrate(context: RunContext) -> tuple[bool, str | None]:
 
         if foreground_ok:
             reset_stage_directory(context.stage_dirs["permutations_test"])
-            print("[6/7] Running permutations_test.py with 10 trials")
+            print(f"[6/7] Running permutations_test.py with {context.trials} trials")
             if not run_stage_subprocess(
                 context.stages["permutations_test"],
                 build_permutations_command(context),
@@ -882,6 +974,14 @@ def main() -> int:
     except Exception as exc:
         print(f"[main] Validation failure: {exc}")
         return 1
+
+    if args.validate_config_only:
+        try:
+            validate_config_only(args, context)
+        except Exception as exc:
+            print(f"[main] Validation failure: {exc}")
+            return 1
+        return 0
 
     overall_status = "failed"
     overall_error: str | None = None

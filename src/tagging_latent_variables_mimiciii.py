@@ -52,13 +52,30 @@ import json
 import math
 import os
 import pickle
+import sys
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
+
+if "--validate-config-only" in sys.argv:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dataset_config import maybe_run_validate_config_only
+
+    maybe_run_validate_config_only(
+        "src/tagging_latent_variables_mimiciii.py",
+        fixed_dataset="mimic",
+    )
 
 import numpy as np
 import pandas as pd
 
+from dataset_config import (
+    get_config_int,
+    get_config_list,
+    get_config_scalar,
+    load_dataset_config,
+)
 from preprocess_mimic_iii_large_contract import canonicalize_stay_id_series
 
 
@@ -1423,6 +1440,14 @@ def save_outputs(
 
 def parse_args():
     p = argparse.ArgumentParser(description="Rule-based latent variable tagging for MIMIC-III ICU stays.")
+    p.add_argument(
+        "--dataset-config-csv",
+        default=None,
+        help=(
+            "Path to the dataset global-variables CSV. If omitted, use the default "
+            "MIMIC config."
+        ),
+    )
 
     # Input modes
     p.add_argument("--summary_csv", type=str, default=None,
@@ -1442,16 +1467,104 @@ def parse_args():
     p.add_argument("--troponin_map_csv", type=str, default=None)
 
     # Output
-    p.add_argument("--output_dir", type=str, default="mimiciii_latent_tags_output")
+    p.add_argument("--output_dir", type=str, default=None)
+    p.add_argument(
+        "--validate-config-only",
+        action="store_true",
+        help="Resolve dataset config values and exit without loading data.",
+    )
 
     return p.parse_args()
 
 
 def main():
+    global LATENT_ORDER
+    global DEFAULT_THRESHOLDS
+    global CHRONIC_ICD_KEYWORDS
+    global ACUTE_ICD_KEYWORDS
+    global PICKLE_TS_SUMMARY_SPECS
+    global PICKLE_GCS_COMPONENTS
+    global PICKLE_URINE_VARIABLE
+    global PICKLE_WEIGHT_VARIABLE
+    global PICKLE_TS_BINARY_HELPERS
+    global PICKLE_OC_OPTIONAL_FIELDS
+    global PICKLE_EXPECTED_SUMMARY_COLUMNS
+    global PROGRESS_EVERY
+
     args = parse_args()
-    ensure_dir(args.output_dir)
+    config = load_dataset_config("mimic", args.dataset_config_csv)
+    LATENT_ORDER = list(get_config_list(config, "LATENT_ORDER", LATENT_ORDER) or [])
+    DEFAULT_THRESHOLDS = dict(
+        get_config_scalar(config, "DEFAULT_THRESHOLDS", DEFAULT_THRESHOLDS)
+    )
+    if isinstance(DEFAULT_THRESHOLDS.get("acute_emergency_types"), list):
+        DEFAULT_THRESHOLDS["acute_emergency_types"] = set(
+            DEFAULT_THRESHOLDS["acute_emergency_types"]
+        )
+    CHRONIC_ICD_KEYWORDS = list(
+        get_config_list(config, "CHRONIC_ICD_KEYWORDS", CHRONIC_ICD_KEYWORDS) or []
+    )
+    ACUTE_ICD_KEYWORDS = list(
+        get_config_list(config, "ACUTE_ICD_KEYWORDS", ACUTE_ICD_KEYWORDS) or []
+    )
+    PICKLE_TS_SUMMARY_SPECS = dict(
+        get_config_scalar(config, "PICKLE_TS_SUMMARY_SPECS", PICKLE_TS_SUMMARY_SPECS)
+    )
+    PICKLE_GCS_COMPONENTS = list(
+        get_config_list(config, "PICKLE_GCS_COMPONENTS", PICKLE_GCS_COMPONENTS) or []
+    )
+    PICKLE_URINE_VARIABLE = str(
+        get_config_scalar(config, "PICKLE_URINE_VARIABLE", PICKLE_URINE_VARIABLE)
+    )
+    PICKLE_WEIGHT_VARIABLE = str(
+        get_config_scalar(config, "PICKLE_WEIGHT_VARIABLE", PICKLE_WEIGHT_VARIABLE)
+    )
+    PICKLE_TS_BINARY_HELPERS = dict(
+        get_config_scalar(config, "PICKLE_TS_BINARY_HELPERS", PICKLE_TS_BINARY_HELPERS)
+    )
+    PICKLE_OC_OPTIONAL_FIELDS = dict(
+        get_config_scalar(config, "PICKLE_OC_OPTIONAL_FIELDS", PICKLE_OC_OPTIONAL_FIELDS)
+    )
+    PICKLE_EXPECTED_SUMMARY_COLUMNS = list(
+        get_config_list(
+            config,
+            "PICKLE_EXPECTED_SUMMARY_COLUMNS",
+            PICKLE_EXPECTED_SUMMARY_COLUMNS,
+        )
+        or []
+    )
+    PROGRESS_EVERY = int(get_config_int(config, "PROGRESS_EVERY", PROGRESS_EVERY) or PROGRESS_EVERY)
+
+    if args.pkl_path is None and not args.summary_csv and not any([
+        args.admissions_csv,
+        args.diagnoses_csv,
+        args.vitals_csv,
+        args.labs_csv,
+        args.urine_csv,
+        args.vaso_csv,
+        args.vent_csv,
+        args.infection_csv,
+        args.troponin_map_csv,
+    ]):
+        configured_pkl_path = get_config_scalar(config, "TAGGING_PKL_PATH", None)
+        if configured_pkl_path is not None:
+            args.pkl_path = str(configured_pkl_path)
+
+    output_dir = args.output_dir
+    if output_dir is None:
+        configured_output_csv = get_config_scalar(
+            config,
+            "TAGGING_OUTPUT_CSV_PATH",
+            None,
+        )
+        if configured_output_csv is not None:
+            output_dir = os.path.dirname(str(configured_output_csv)) or "."
+        else:
+            output_dir = "mimiciii_latent_tags_output"
+
+    ensure_dir(output_dir)
     print("=== Starting MIMIC-III latent tagging ===")
-    print(f"Output directory: {os.path.abspath(args.output_dir)}")
+    print(f"Output directory: {os.path.abspath(output_dir)}")
 
     summary_mode = args.summary_csv is not None
     pkl_mode = args.pkl_path is not None
@@ -1513,10 +1626,10 @@ def main():
 
     print("[5/5] Running validation and saving outputs...")
     validation_summary = build_validation_summary(latent_df, summary_df)
-    save_outputs(args.output_dir, summary_df, latent_df, decision_trees, validation_summary)
+    save_outputs(output_dir, summary_df, latent_df, decision_trees, validation_summary)
 
     print("\nDone.")
-    print(f"Saved outputs to: {os.path.abspath(args.output_dir)}")
+    print(f"Saved outputs to: {os.path.abspath(output_dir)}")
     print("Files:")
     for fname in [
         "latent_tags.csv",

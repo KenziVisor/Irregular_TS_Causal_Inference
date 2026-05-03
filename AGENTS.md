@@ -25,13 +25,16 @@ This is script-first research code, not a package:
 - Most `src/*.py` files use paths like `../../data/...` and `../../physionet2012/...` relative to the process working directory.
 - `src/draft/*.py` usually assume `../../../data/...`.
 - Both causal graph scripts now support explicit `--graph-pkl-path` / `--graph-png-path` CLI outputs; if flags are omitted they still fall back to their historical relative defaults.
+- Dataset-global defaults are loaded from `configs/physionet-global-variables.csv` and `configs/mimic-global-variables.csv`; dataset-aware scripts generally accept `--dataset-config-csv` and resolve values as `CLI > CSV config > old fallback constant`.
+- Use the WSL conda environment `econml310` for project commands and validation by default, especially anything that imports `econml`, `sklearn`, `torch`, `pandas`, or `networkx`.
 - Generated result folders under `src/run_*` are archived experiment outputs, not source code.
 
 ## Repo Map
 
-- `src/preprocess_physionet_2012.py`: raw PhysioNet files -> processed pickle. Auto-runs on import.
+- `src/preprocess_physionet_2012.py`: raw PhysioNet files -> processed pickle. Guarded by `if __name__ == "__main__":`.
 - `src/preprocess_mimic_iii_large.py`: raw MIMIC-III ICU data -> processed pickle. Final exported artifact is now PhysioNet-compatible `[ts, oc, ts_ids]`; internal `TABLE`, `HADM_ID`, `SUBJECT_ID`, and legacy split arrays are not part of the main pickle.
 - `src/preprocess_mimic_iii_large_contract.py`: pure compatibility helpers for canonicalizing MIMIC exports into PhysioNet-style `ts`, `oc`, and `ts_ids`, plus strict schema validation.
+- `src/dataset_config.py`: import-safe CSV loader for dataset-global defaults; it does not import project scripts.
 - `main.py`: top-level post-preprocessing orchestrator. Uses subprocesses only, writes one subdirectory per stage plus `logs/` and `run_summary.json`, and expects preprocessing to be complete before it runs.
 - `src/tagging_latent_variables_mimiciii.py`: rule-based MIMIC latent tagger. Supports summary CSV, raw concept CSVs, and canonical `[ts, oc, ts_ids]` pickle input; pickle mode reconstructs only the rule-needed summary fields from canonical `ts`/`oc`, with key aliases such as `MBP -> MAP`, `PCO2 -> PaCO2`, `PO2 -> PaO2`, `O2 Saturation -> SpO2`, `Creatinine Blood -> Creatinine`, and `Bilirubin (Total) -> Bilirubin`, and computes `GCS_min` from `GCS_eye`, `GCS_motor`, `GCS_verbal`.
 - `src/physionet2012_causal_graph.py`: builds the PhysioNet DAG and now supports explicit graph pickle / PNG output paths via CLI.
@@ -318,8 +321,9 @@ Each run folder contains per-treatment outputs plus `global_summary.csv` and `ma
 - `Height` exists in the DAG but is ignored by the current main causal scripts.
 - The simple tagger and the Optuna optimizer belong to the older summary-statistics pipeline.
 - `matching_causal_effect.py` still defaults to the older `latent_tags.csv` path.
-- Several scripts auto-run when imported: preprocess, simple tagging, and `draft/treatment_split.py`.
+- Several scripts auto-run when imported: the large MIMIC preprocessor, the older simple tagger, and `draft/treatment_split.py`.
 - Default output directories are relative to the process cwd; this is why archived run folders ended up directly under `src/`.
+- `src/majority_vote_latents.py` expects each voter CSV to contain only `ts_id` plus binary latent tag columns. If model prediction CSVs contain both `*_prob` and binary tag columns, split them first with `src/split_predicted_latent_tags.py` and point `main.py` / `run_main.sh` at a binary-only voter directory.
 - Saved latent decision-tree pickles can reference rule callables under `__main__` from the producing script, so naive standalone `pickle.load()` may fail unless the loader provides matching placeholder function names locally.
 - Saved CATE model pickles under `data/relevant_outputs/cate_outputs_predicted_230326` were created with a newer stack than the current unpinned Python 3.8 requirements environment: they reference `econml.validate.sensitivity_analysis.SensitivityParams` and `scikit-learn 1.5.1`, so artifact-side validation may require a compatibility shim or a one-time refit fallback.
 - In the older WSL `econml310` env with `econml 0.15.1`, loaded `LinearDML` / `CausalForestDML` estimators exposed `residuals_` and `summary()` when trained with `cache_values=True`, but they did not expose estimator-native `robustness_value()`, `sensitivity_summary()`, or `sensitivity_interval()`. That version mismatch was the main reason the old sensitivity pipeline fell back to manual calculations.
@@ -347,6 +351,7 @@ When you start a new task in this repo:
 
 1. confirm the current working directory and resolve all relative paths first
 2. check whether the processed pickle, graph pickle, and intended latent CSV actually exist
-3. assume the clinical tagger is the current representation unless the user explicitly wants the older threshold-optimized pipeline
-4. ignore `src/run_*` unless the task is about analyzing prior results
-5. treat this repo as research scripts with side effects, not as import-safe library code
+3. run project Python commands through the WSL conda env `econml310` unless the task is explicitly environment-independent
+4. assume the clinical tagger is the current representation unless the user explicitly wants the older threshold-optimized pipeline
+5. ignore `src/run_*` unless the task is about analyzing prior results
+6. treat this repo as research scripts with side effects, not as import-safe library code

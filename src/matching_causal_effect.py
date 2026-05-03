@@ -3,12 +3,32 @@ from __future__ import annotations
 import argparse
 import os
 import pickle
+import sys
 import warnings
+from pathlib import Path
 from typing import Dict, List, Set, Tuple
+
+if "--validate-config-only" in sys.argv:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dataset_config import maybe_run_validate_config_only
+
+    maybe_run_validate_config_only(
+        "src/matching_causal_effect.py",
+        default_dataset="physionet",
+    )
 
 import networkx as nx
 import numpy as np
 import pandas as pd
+from dataset_config import (
+    get_config_bool,
+    get_config_float,
+    get_config_int,
+    get_config_list,
+    get_config_scalar,
+    get_first_available,
+    load_dataset_config,
+)
 from preprocess_mimic_iii_large_contract import canonicalize_stay_id_series
 
 
@@ -23,16 +43,14 @@ GRAPH_PKL_PATH = "../../data/causal_graph.pkl"
 OUTCOME_COL = "in_hospital_mortality"
 GRAPH_OUTCOME_NODE = "Death"
 
-PHYSIONET_TREATMENTS = [
+TREATMENTS = [
     "Severity", "Shock", "RespFail", "RenalFail", "HepFail", "HemeFail",
     "Inflam", "NeuroFail", "CardInj", "Metab"
 ]
-MIMIC_TREATMENTS = [
-    "Severity", "Inflammation", "Shock", "RespFail", "RenalDysfunction",
-    "HepaticDysfunction", "CoagDysfunction", "NeuroDysfunction",
-    "CardiacInjury", "MetabolicDerangement",
+BACKGROUND_FEATURE_COLUMNS = [
+    "Age", "Gender", "Weight",
+    "ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4",
 ]
-TREATMENTS = list(PHYSIONET_TREATMENTS)
 
 OUTPUT_DIR = "./matching_outputs"
 SEED = 42
@@ -60,31 +78,24 @@ def parse_args() -> argparse.Namespace:
         default=DATASET_MODEL,
         help=f"Dataset selector for path defaults. Default: {DATASET_MODEL}",
     )
+    parser.add_argument(
+        "--dataset-config-csv",
+        default=None,
+        help=(
+            "Path to the dataset global-variables CSV. If omitted, use the default "
+            "config for --model."
+        ),
+    )
     parser.add_argument("--latent-tags-path", default=None)
     parser.add_argument("--physionet-pkl-path", default=None)
     parser.add_argument("--graph-pkl-path", default=None)
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument(
+        "--validate-config-only",
+        action="store_true",
+        help="Resolve dataset config values and exit without loading data.",
+    )
     return parser.parse_args()
-
-
-def get_dataset_defaults(model: str) -> Dict[str, object]:
-    if model == "physionet":
-        return {
-            "latent_tags_path": LATENT_TAGS_PATH,
-            "physionet_pkl_path": PHYSIONET_PKL_PATH,
-            "graph_pkl_path": GRAPH_PKL_PATH,
-            "graph_outcome_node": "Death",
-            "treatments": list(PHYSIONET_TREATMENTS),
-        }
-    if model == "mimic":
-        return {
-            "latent_tags_path": "mimiciii_latent_tags_output/latent_tags.csv",
-            "physionet_pkl_path": "../data/processed/mimic_iii_ts_oc_ids.pkl",
-            "graph_pkl_path": None,
-            "graph_outcome_node": "InHospitalMortality",
-            "treatments": list(MIMIC_TREATMENTS),
-        }
-    raise ValueError(f"Unsupported model: {model!r}")
 
 
 def resolve_runtime_path(
@@ -138,6 +149,7 @@ def load_graph(path: str) -> nx.DiGraph:
 def build_background_features(
     ts: pd.DataFrame,
     dataset_model: str | None = None,
+    background_feature_columns: List[str] | None = None,
 ) -> pd.DataFrame:
     """
     Build patient-level observed background covariates from ts.
@@ -145,17 +157,14 @@ def build_background_features(
     MIMIC does not guarantee those columns, so only keep what is actually present.
     """
     current_model = DATASET_MODEL if dataset_model is None else dataset_model
+    configured_columns = list(background_feature_columns or BACKGROUND_FEATURE_COLUMNS)
     df = ts.copy().sort_values(["ts_id", "minute"])
 
-    keep_vars = ["Age", "Gender", "Weight"]
     if current_model == "physionet":
-        keep_vars += ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]
+        keep_vars = list(configured_columns)
     else:
         available_variables = set(df["variable"].astype(str).tolist())
-        keep_vars += [
-            col for col in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]
-            if col in available_variables
-        ]
+        keep_vars = [col for col in configured_columns if col in available_variables]
     df = df[df["variable"].isin(keep_vars)].copy()
 
     first_vals = (
@@ -166,7 +175,7 @@ def build_background_features(
     bg = first_vals.pivot(index="ts_id", columns="variable", values="value").reset_index()
 
     if current_model == "physionet":
-        for col in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]:
+        for col in [c for c in configured_columns if c.startswith("ICUType_")]:
             if col not in bg.columns:
                 bg[col] = 0.0
 
@@ -216,7 +225,11 @@ def load_analysis_dataframe(
     if oc_small["ts_id"].isna().any():
         raise ValueError("Processed pickle oc_small contains missing ts_id values after canonicalization.")
 
-    bg_df = build_background_features(ts, dataset_model=DATASET_MODEL)
+    bg_df = build_background_features(
+        ts,
+        dataset_model=DATASET_MODEL,
+        background_feature_columns=BACKGROUND_FEATURE_COLUMNS,
+    )
     bg_df["ts_id"] = canonicalize_stay_id_series(bg_df["ts_id"])
     if bg_df["ts_id"].isna().any():
         raise ValueError("Background features contain missing ts_id values after canonicalization.")
@@ -994,49 +1007,96 @@ def main():
     global LATENT_TAGS_PATH
     global PHYSIONET_PKL_PATH
     global GRAPH_PKL_PATH
+    global OUTCOME_COL
     global GRAPH_OUTCOME_NODE
     global TREATMENTS
+    global BACKGROUND_FEATURE_COLUMNS
     global OUTPUT_DIR
+    global SEED
+    global DOWN_SAMPLE
+    global USE_EXPANDED_SAFE_CONFOUNDERS
+    global max_dist
+    global MIN_MATCHED_PAIRS
+    global MIN_MATCH_RATE
+    global MATCH_WITH_REPLACEMENT
+    global REQUIRE_BINARY_CONF
     warnings.filterwarnings("ignore", category=FutureWarning)
-    np.random.seed(SEED)
     args = parse_args()
     DATASET_MODEL = args.model
-    dataset_defaults = get_dataset_defaults(DATASET_MODEL)
+    config = load_dataset_config(DATASET_MODEL, args.dataset_config_csv)
 
-    if DATASET_MODEL == "mimic" and args.graph_pkl_path is None:
-        raise ValueError(
-            "MIMIC mode requires --graph-pkl-path because this repo does not define "
-            "a relative default MIMIC graph pickle path."
+    OUTCOME_COL = str(get_config_scalar(config, "OUTCOME_COL", OUTCOME_COL))
+    GRAPH_OUTCOME_NODE = str(
+        get_config_scalar(config, "GRAPH_OUTCOME_NODE", GRAPH_OUTCOME_NODE)
+    )
+    TREATMENTS = list(get_config_list(config, "TREATMENTS", TREATMENTS) or [])
+    BACKGROUND_FEATURE_COLUMNS = list(
+        get_config_list(config, "BACKGROUND_FEATURE_COLUMNS", BACKGROUND_FEATURE_COLUMNS) or []
+    )
+    SEED = int(get_config_int(config, "SEED", SEED) or SEED)
+    DOWN_SAMPLE = bool(get_config_bool(config, "DOWN_SAMPLE", DOWN_SAMPLE))
+    USE_EXPANDED_SAFE_CONFOUNDERS = bool(
+        get_config_bool(
+            config,
+            "USE_EXPANDED_SAFE_CONFOUNDERS",
+            USE_EXPANDED_SAFE_CONFOUNDERS,
         )
-    if DATASET_MODEL == "mimic" and args.output_dir is None:
-        raise ValueError(
-            "MIMIC mode requires --output-dir because this repo does not define "
-            "a safe default MIMIC output directory and the PhysioNet default would collide."
-        )
+    )
+    max_dist = int(get_config_int(config, "MAX_DIST", max_dist) or max_dist)
+    MIN_MATCHED_PAIRS = int(
+        get_config_int(config, "MIN_MATCHED_PAIRS", MIN_MATCHED_PAIRS)
+        or MIN_MATCHED_PAIRS
+    )
+    MIN_MATCH_RATE = float(
+        get_config_float(config, "MIN_MATCH_RATE", MIN_MATCH_RATE)
+        or MIN_MATCH_RATE
+    )
+    MATCH_WITH_REPLACEMENT = bool(
+        get_config_bool(config, "MATCH_WITH_REPLACEMENT", MATCH_WITH_REPLACEMENT)
+    )
+    REQUIRE_BINARY_CONF = bool(
+        get_config_bool(config, "REQUIRE_BINARY_CONF", REQUIRE_BINARY_CONF)
+    )
 
-    GRAPH_OUTCOME_NODE = str(dataset_defaults["graph_outcome_node"])
-    TREATMENTS = list(dataset_defaults["treatments"])
+    latent_tags_default = get_first_available(
+        config,
+        ["MATCHING_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
+        LATENT_TAGS_PATH,
+    )
+    physionet_pkl_default = get_first_available(
+        config,
+        ["MATCHING_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
+        PHYSIONET_PKL_PATH,
+    )
+    graph_pkl_default = get_first_available(config, ["GRAPH_PKL_PATH"], GRAPH_PKL_PATH)
+    output_dir_default = get_first_available(
+        config,
+        ["MATCHING_OUTPUT_DIR", "OUTPUT_DIR"],
+        OUTPUT_DIR,
+    )
+
     LATENT_TAGS_PATH = resolve_runtime_path(
         args.latent_tags_path,
-        str(dataset_defaults["latent_tags_path"]),
+        str(latent_tags_default),
         "LATENT_TAGS_PATH",
     )
     PHYSIONET_PKL_PATH = resolve_runtime_path(
         args.physionet_pkl_path,
-        str(dataset_defaults["physionet_pkl_path"]),
+        str(physionet_pkl_default),
         "PHYSIONET_PKL_PATH",
     )
     GRAPH_PKL_PATH = resolve_runtime_path(
         args.graph_pkl_path,
-        dataset_defaults["graph_pkl_path"],
+        graph_pkl_default,
         "GRAPH_PKL_PATH",
     )
     OUTPUT_DIR = resolve_runtime_path(
         args.output_dir,
-        OUTPUT_DIR,
+        str(output_dir_default),
         "OUTPUT_DIR",
         must_exist=False,
     )
+    np.random.seed(SEED)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print("=== Starting matched-pair causal effect run ===")
     print(

@@ -1,9 +1,21 @@
 import argparse
 import os
 import pickle
+import sys
+from pathlib import Path
+
+if "--validate-config-only" in sys.argv:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dataset_config import maybe_run_validate_config_only
+
+    maybe_run_validate_config_only(
+        "src/physionet2012_causal_graph.py",
+        fixed_dataset="physionet",
+    )
 
 import matplotlib.pyplot as plt
 import networkx as nx
+from dataset_config import get_first_available, load_dataset_config
 
 
 DEFAULT_GRAPH_PKL_PATH = "../data/causal_graph.pkl"
@@ -15,14 +27,27 @@ def parse_args() -> argparse.Namespace:
         description="Build the PhysioNet 2012 causal DAG and save the graph artifacts."
     )
     parser.add_argument(
+        "--dataset-config-csv",
+        default=None,
+        help=(
+            "Path to the dataset global-variables CSV. If omitted, use the default "
+            "PhysioNet config."
+        ),
+    )
+    parser.add_argument(
         "--graph-pkl-path",
-        default=DEFAULT_GRAPH_PKL_PATH,
+        default=None,
         help=f"Output path for the graph pickle. Default: {DEFAULT_GRAPH_PKL_PATH}",
     )
     parser.add_argument(
         "--graph-png-path",
-        default=DEFAULT_GRAPH_PNG_PATH,
+        default=None,
         help=f"Output path for the rendered graph PNG. Default: {DEFAULT_GRAPH_PNG_PATH}",
+    )
+    parser.add_argument(
+        "--validate-config-only",
+        action="store_true",
+        help="Resolve dataset config values and exit without creating graph outputs.",
     )
     return parser.parse_args()
 
@@ -414,17 +439,32 @@ def draw_graph(
 
 def main() -> None:
     args = parse_args()
+    config = load_dataset_config("physionet", args.dataset_config_csv)
+    graph_pkl_path = args.graph_pkl_path or str(
+        get_first_available(
+            config,
+            ["DEFAULT_GRAPH_PKL_PATH", "GRAPH_PKL_PATH"],
+            DEFAULT_GRAPH_PKL_PATH,
+        )
+    )
+    graph_png_path = args.graph_png_path or str(
+        get_first_available(
+            config,
+            ["DEFAULT_GRAPH_PNG_PATH", "GRAPH_PNG_PATH"],
+            DEFAULT_GRAPH_PNG_PATH,
+        )
+    )
     print("=== Building PhysioNet 2012 causal DAG ===")
     print("[1/2] Creating graph structure")
     g = create_physionet2012_causal_graph(
         save=1,
-        graph_pkl_path=args.graph_pkl_path,
+        graph_pkl_path=graph_pkl_path,
     )
     print("[2/2] Rendering graph figure")
     draw_graph(
         g,
         save=1,
-        graph_png_path=args.graph_png_path,
+        graph_png_path=graph_png_path,
     )
     print("PhysioNet 2012 causal DAG build completed.")
 

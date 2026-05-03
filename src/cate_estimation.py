@@ -9,12 +9,32 @@ import sys
 import warnings
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
+from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
+
+if "--validate-config-only" in sys.argv:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dataset_config import maybe_run_validate_config_only
+
+    maybe_run_validate_config_only(
+        "src/cate_estimation.py",
+        default_dataset="physionet",
+    )
 
 import networkx as nx
 import numpy as np
 import pandas as pd
 from econml.dml import CausalForestDML, LinearDML
+from dataset_config import (
+    get_config_bool,
+    get_config_float,
+    get_config_int,
+    get_config_list,
+    get_config_scalar,
+    get_first_available,
+    load_dataset_config,
+    resolve_with_precedence,
+)
 from preprocess_mimic_iii_large_contract import canonicalize_stay_id_series
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
@@ -30,19 +50,18 @@ GRAPH_PKL_PATH = "../../data/causal_graph.pkl"
 OUTCOME_COL = "in_hospital_mortality"
 GRAPH_OUTCOME_NODE = "Death"
 
-PHYSIONET_TREATMENTS = [
+TREATMENTS = [
     "Severity", "Shock", "RespFail", "RenalFail", "HepFail", "HemeFail",
     "Inflam", "NeuroFail", "CardInj", "Metab"
 ]
-MIMIC_TREATMENTS = [
-    "Severity", "Inflammation", "Shock", "RespFail", "RenalDysfunction",
-    "HepaticDysfunction", "CoagDysfunction", "NeuroDysfunction",
-    "CardiacInjury", "MetabolicDerangement",
-]
-TREATMENTS = list(PHYSIONET_TREATMENTS)
 BACKGROUND_FEATURE_COLUMNS = [
     "Age", "Gender", "Weight",
     "ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4",
+]
+EFFECT_MODIFIER_COLUMNS = [
+    "Age", "Gender", "Weight",
+    "ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4",
+    "ChronicRisk", "AcuteInsult",
 ]
 
 OUTPUT_DIR = "../../data/relevant_outputs/cate_outputs_predicted_230326"
@@ -83,6 +102,14 @@ def parse_args() -> argparse.Namespace:
         help=f"Dataset selector for path defaults. Default: {DATASET_MODEL}",
     )
     parser.add_argument(
+        "--dataset-config-csv",
+        default=None,
+        help=(
+            "Path to the dataset global-variables CSV. If omitted, use the default "
+            "config for --model."
+        ),
+    )
+    parser.add_argument(
         "--latent-tags-path",
         default=None,
         help=(
@@ -117,13 +144,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--down-sample",
         type=str_to_bool,
-        default=DOWN_SAMPLE,
+        default=None,
         help=f"Whether to down-sample the majority outcome class. Default: {DOWN_SAMPLE}",
     )
     parser.add_argument(
         "--use-expanded-safe-confounders",
         type=str_to_bool,
-        default=USE_EXPANDED_SAFE_CONFOUNDERS,
+        default=None,
         help=(
             "Whether to use the expanded safe confounder set instead of the minimal one. "
             f"Default: {USE_EXPANDED_SAFE_CONFOUNDERS}"
@@ -132,30 +159,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-type",
         choices=["LinearDML", "CausalForest"],
-        default=MODEL_TYPE,
+        default=None,
         help=f"Estimator family to use. Default: {MODEL_TYPE}",
     )
+    parser.add_argument(
+        "--validate-config-only",
+        action="store_true",
+        help="Resolve dataset config values and exit without loading data.",
+    )
     return parser.parse_args()
-
-
-def get_dataset_defaults(model: str) -> Dict[str, object]:
-    if model == "physionet":
-        return {
-            "latent_tags_path": LATENT_TAGS_PATH,
-            "physionet_pkl_path": PHYSIONET_PKL_PATH,
-            "graph_pkl_path": GRAPH_PKL_PATH,
-            "graph_outcome_node": "Death",
-            "treatments": list(PHYSIONET_TREATMENTS),
-        }
-    if model == "mimic":
-        return {
-            "latent_tags_path": "mimiciii_latent_tags_output/latent_tags.csv",
-            "physionet_pkl_path": "../data/processed/mimic_iii_ts_oc_ids.pkl",
-            "graph_pkl_path": None,
-            "graph_outcome_node": "InHospitalMortality",
-            "treatments": list(MIMIC_TREATMENTS),
-        }
-    raise ValueError(f"Unsupported model: {model!r}")
 
 
 def resolve_runtime_path(
@@ -728,6 +740,7 @@ def normalize_expected_columns(
 def build_background_features(
     ts: pd.DataFrame,
     dataset_model: str | None = None,
+    background_feature_columns: List[str] | None = None,
 ) -> pd.DataFrame:
     """
     Build patient-level observed background covariates from ts.
@@ -735,17 +748,14 @@ def build_background_features(
     MIMIC does not guarantee those columns, so only keep what is actually present.
     """
     current_model = DATASET_MODEL if dataset_model is None else dataset_model
+    configured_columns = list(background_feature_columns or BACKGROUND_FEATURE_COLUMNS)
     df = ts.copy().sort_values(["ts_id", "minute"])
 
-    keep_vars = ["Age", "Gender", "Weight"]
     if current_model == "physionet":
-        keep_vars += ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]
+        keep_vars = list(configured_columns)
     else:
         available_variables = set(df["variable"].astype(str).tolist())
-        keep_vars += [
-            col for col in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]
-            if col in available_variables
-        ]
+        keep_vars = [col for col in configured_columns if col in available_variables]
 
     df = df[df["variable"].isin(keep_vars)].copy()
 
@@ -757,7 +767,7 @@ def build_background_features(
     bg = first_vals.pivot(index="ts_id", columns="variable", values="value").reset_index()
 
     if current_model == "physionet":
-        for col in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]:
+        for col in [c for c in configured_columns if c.startswith("ICUType_")]:
             if col not in bg.columns:
                 bg[col] = 0.0
 
@@ -820,7 +830,11 @@ def load_analysis_dataframe(
     if oc_small["ts_id"].isna().any():
         raise ValueError("Processed pickle oc_small contains missing ts_id values after canonicalization.")
 
-    bg_df = build_background_features(ts, dataset_model=current_model)
+    bg_df = build_background_features(
+        ts,
+        dataset_model=current_model,
+        background_feature_columns=BACKGROUND_FEATURE_COLUMNS,
+    )
     bg_df["ts_id"] = canonicalize_stay_id_series(bg_df["ts_id"])
     if bg_df["ts_id"].isna().any():
         raise ValueError("Background features contain missing ts_id values after canonicalization.")
@@ -993,7 +1007,7 @@ def dataframe_columns_to_graph_nodes(
     for col in available_columns:
         if col == "ts_id":
             continue
-        if col == "in_hospital_mortality":
+        if col == OUTCOME_COL:
             continue
         if col.startswith("ICUType_"):
             if "ICUType" in graph_nodes:
@@ -1399,21 +1413,8 @@ def choose_effect_modifiers(
     treatment: str,
     confounders: List[str],
 ) -> List[str]:
-    """
-    Keep X compact and stable.
-    You can change this later, but this is a sane default.
-    """
-    if DATASET_MODEL == "mimic":
-        preferred = [
-            "Age", "Gender", "Weight",
-            "ChronicBurden", "AcuteInsult",
-        ]
-    else:
-        preferred = [
-            "Age", "Gender", "Weight",
-            "ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4",
-            "ChronicRisk", "AcuteInsult",
-        ]
+    """Keep X compact and stable in the configured column order."""
+    preferred = list(EFFECT_MODIFIER_COLUMNS)
     return [c for c in preferred if c in df.columns and c != treatment and c != OUTCOME_COL]
 
 
@@ -2344,54 +2345,101 @@ def main():
     global LATENT_TAGS_PATH
     global PHYSIONET_PKL_PATH
     global GRAPH_PKL_PATH
+    global OUTCOME_COL
     global GRAPH_OUTCOME_NODE
     global TREATMENTS
+    global BACKGROUND_FEATURE_COLUMNS
+    global EFFECT_MODIFIER_COLUMNS
     global OUTPUT_DIR
+    global SEED
     global DOWN_SAMPLE
     global USE_EXPANDED_SAFE_CONFOUNDERS
     global MODEL_TYPE
+    global DEFAULT_SENSITIVITY_ALPHA
+    global ARTIFACT_SCHEMA_VERSION
 
     args = parse_args()
     DATASET_MODEL = args.model
-    dataset_defaults = get_dataset_defaults(DATASET_MODEL)
+    config = load_dataset_config(DATASET_MODEL, args.dataset_config_csv)
 
-    if DATASET_MODEL == "mimic" and args.graph_pkl_path is None:
-        raise ValueError(
-            "MIMIC mode requires --graph-pkl-path because this repo does not define "
-            "a relative default MIMIC graph pickle path."
-        )
-    if DATASET_MODEL == "mimic" and args.output_dir is None:
-        raise ValueError(
-            "MIMIC mode requires --output-dir because this repo does not define "
-            "a safe default MIMIC output directory and the PhysioNet default would collide."
-        )
+    OUTCOME_COL = str(get_config_scalar(config, "OUTCOME_COL", OUTCOME_COL))
+    GRAPH_OUTCOME_NODE = str(
+        get_config_scalar(config, "GRAPH_OUTCOME_NODE", GRAPH_OUTCOME_NODE)
+    )
+    TREATMENTS = list(get_config_list(config, "TREATMENTS", TREATMENTS) or [])
+    BACKGROUND_FEATURE_COLUMNS = list(
+        get_config_list(config, "BACKGROUND_FEATURE_COLUMNS", BACKGROUND_FEATURE_COLUMNS) or []
+    )
+    EFFECT_MODIFIER_COLUMNS = list(
+        get_config_list(config, "EFFECT_MODIFIER_COLUMNS", EFFECT_MODIFIER_COLUMNS) or []
+    )
+    SEED = int(get_config_int(config, "SEED", SEED) or SEED)
+    DEFAULT_SENSITIVITY_ALPHA = float(
+        get_config_float(config, "DEFAULT_SENSITIVITY_ALPHA", DEFAULT_SENSITIVITY_ALPHA)
+        or DEFAULT_SENSITIVITY_ALPHA
+    )
+    ARTIFACT_SCHEMA_VERSION = int(
+        get_config_int(config, "ARTIFACT_SCHEMA_VERSION", ARTIFACT_SCHEMA_VERSION)
+        or ARTIFACT_SCHEMA_VERSION
+    )
 
-    GRAPH_OUTCOME_NODE = str(dataset_defaults["graph_outcome_node"])
-    TREATMENTS = list(dataset_defaults["treatments"])
+    latent_tags_default = get_first_available(
+        config,
+        ["CATE_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
+        LATENT_TAGS_PATH,
+    )
+    physionet_pkl_default = get_first_available(
+        config,
+        ["CATE_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
+        PHYSIONET_PKL_PATH,
+    )
+    graph_pkl_default = get_first_available(config, ["GRAPH_PKL_PATH"], GRAPH_PKL_PATH)
+    output_dir_default = get_first_available(
+        config,
+        ["CATE_OUTPUT_DIR", "OUTPUT_DIR"],
+        OUTPUT_DIR,
+    )
+
     LATENT_TAGS_PATH = resolve_runtime_path(
         args.latent_tags_path,
-        str(dataset_defaults["latent_tags_path"]),
+        str(latent_tags_default),
         "LATENT_TAGS_PATH",
     )
     PHYSIONET_PKL_PATH = resolve_runtime_path(
         args.physionet_pkl_path,
-        str(dataset_defaults["physionet_pkl_path"]),
+        str(physionet_pkl_default),
         "PHYSIONET_PKL_PATH",
     )
     GRAPH_PKL_PATH = resolve_runtime_path(
         args.graph_pkl_path,
-        dataset_defaults["graph_pkl_path"],
+        graph_pkl_default,
         "GRAPH_PKL_PATH",
     )
     OUTPUT_DIR = resolve_runtime_path(
         args.output_dir,
-        OUTPUT_DIR,
+        str(output_dir_default),
         "OUTPUT_DIR",
         must_exist=False,
     )
-    DOWN_SAMPLE = args.down_sample
-    USE_EXPANDED_SAFE_CONFOUNDERS = args.use_expanded_safe_confounders
-    MODEL_TYPE = args.model_type
+    DOWN_SAMPLE = bool(
+        resolve_with_precedence(
+            args.down_sample,
+            config,
+            "DOWN_SAMPLE",
+            DOWN_SAMPLE,
+        )
+    )
+    USE_EXPANDED_SAFE_CONFOUNDERS = bool(
+        resolve_with_precedence(
+            args.use_expanded_safe_confounders,
+            config,
+            "USE_EXPANDED_SAFE_CONFOUNDERS",
+            USE_EXPANDED_SAFE_CONFOUNDERS,
+        )
+    )
+    MODEL_TYPE = str(
+        resolve_with_precedence(args.model_type, config, "MODEL_TYPE", MODEL_TYPE)
+    )
 
     warnings.filterwarnings("ignore", category=FutureWarning)
     os.makedirs(OUTPUT_DIR, exist_ok=True)

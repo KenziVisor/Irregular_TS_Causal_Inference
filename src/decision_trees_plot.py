@@ -31,6 +31,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
 
+from dataset_config import get_config_list, get_config_scalar, load_dataset_config
+
 
 # ---------------------------------------------------------------------------
 # Compatibility placeholders for pickle.load
@@ -258,6 +260,14 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--dataset", required=True, choices=["mimic", "physionet"])
+    parser.add_argument(
+        "--dataset-config-csv",
+        default=None,
+        help=(
+            "Path to the dataset global-variables CSV. If omitted, use the default "
+            "config for --dataset."
+        ),
+    )
     parser.add_argument("--pickle-path", required=True, help="Path to the saved latent decision-tree pickle.")
     parser.add_argument(
         "--output-dir",
@@ -974,6 +984,20 @@ def ensure_output_paths(latents: Sequence[str], dataset: str, output_dir: Path, 
 def main() -> None:
     args = parse_args()
     validate_args(args)
+    config = load_dataset_config(args.dataset, args.dataset_config_csv)
+    configured_thresholds = get_config_scalar(config, "DEFAULT_THRESHOLDS", None)
+    if isinstance(configured_thresholds, dict):
+        DEFAULT_THRESHOLDS[args.dataset] = dict(configured_thresholds)
+        if isinstance(
+            DEFAULT_THRESHOLDS[args.dataset].get("acute_emergency_types"),
+            list,
+        ):
+            DEFAULT_THRESHOLDS[args.dataset]["acute_emergency_types"] = set(
+                DEFAULT_THRESHOLDS[args.dataset]["acute_emergency_types"]
+            )
+    configured_latents = get_config_list(config, "LATENT_ORDER", None)
+    if configured_latents:
+        KNOWN_LATENTS[args.dataset] = set(str(latent) for latent in configured_latents)
 
     pickle_path = Path(args.pickle_path).resolve()
     output_dir = Path(args.output_dir).resolve()

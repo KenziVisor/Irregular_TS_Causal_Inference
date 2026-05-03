@@ -1,6 +1,18 @@
 import argparse
 import os
 import pickle
+import sys
+from pathlib import Path
+
+if "--validate-config-only" in sys.argv:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dataset_config import maybe_run_validate_config_only
+
+    maybe_run_validate_config_only(
+        "src/mortality_prediction_using_latents.py",
+        default_dataset="physionet",
+    )
+
 import numpy as np
 import pandas as pd
 
@@ -13,11 +25,20 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
+from dataset_config import (
+    get_config_int,
+    get_config_scalar,
+    get_first_available,
+    load_dataset_config,
+)
+
 
 DATASET_MODEL = "physionet"
 latent_tags_csv_path = "../../data/predicted_latent_tags_230326_absolute_tags.csv"
 physionet_ts_oc_ids_pkl_path = '../../data/processed/physionet2012_ts_oc_ids.pkl'
 results_txt_path = "predicted_230326_mortality_prediction_results.txt"
+OUTCOME_COL = "in_hospital_mortality"
+SEED = 42
 
 # =========================
 # 1) Load & merge data
@@ -34,26 +55,23 @@ def parse_args():
         default=DATASET_MODEL,
         help=f"Dataset selector for path defaults. Default: {DATASET_MODEL}",
     )
+    parser.add_argument(
+        "--dataset-config-csv",
+        default=None,
+        help=(
+            "Path to the dataset global-variables CSV. If omitted, use the default "
+            "config for --model."
+        ),
+    )
     parser.add_argument("--latent-tags-path", default=None)
     parser.add_argument("--physionet-pkl-path", default=None)
     parser.add_argument("--results-txt-path", default=None)
+    parser.add_argument(
+        "--validate-config-only",
+        action="store_true",
+        help="Resolve dataset config values and exit without loading data.",
+    )
     return parser.parse_args()
-
-
-def get_dataset_defaults(model: str):
-    if model == "physionet":
-        return {
-            "latent_tags_path": latent_tags_csv_path,
-            "physionet_pkl_path": physionet_ts_oc_ids_pkl_path,
-            "results_txt_path": results_txt_path,
-        }
-    if model == "mimic":
-        return {
-            "latent_tags_path": "mimiciii_latent_tags_output/latent_tags.csv",
-            "physionet_pkl_path": "../data/processed/mimic_iii_ts_oc_ids.pkl",
-            "results_txt_path": None,
-        }
-    raise ValueError(f"Unsupported model: {model!r}")
 
 
 def resolve_runtime_path(cli_value: str | None, default_value: str, field_name: str) -> str:
@@ -106,7 +124,12 @@ def load_latents_and_outcomes(latent_tags_csv_path: str, physionet_ts_oc_ids_pkl
     print(f"      Loaded processed pickle: ts rows={len(ts):,}, oc rows={len(oc):,}, patients={len(ts_ids):,}")
 
     # keep only what we need
-    oc_small = oc[["ts_id", "in_hospital_mortality"]].copy()
+    if OUTCOME_COL not in oc.columns:
+        raise ValueError(
+            f"Processed pickle is missing outcome column '{OUTCOME_COL}'. "
+            f"Available oc columns: {list(oc.columns)}"
+        )
+    oc_small = oc[["ts_id", OUTCOME_COL]].copy()
 
     print("[3/5] Merging latent tags with outcome labels")
     # merge
@@ -115,17 +138,17 @@ def load_latents_and_outcomes(latent_tags_csv_path: str, physionet_ts_oc_ids_pkl
     df = latent_df.merge(oc_small, on="ts_id", how="inner")
 
     # sanity
-    if df["in_hospital_mortality"].isna().any():
-        df = df.dropna(subset=["in_hospital_mortality"])
+    if df[OUTCOME_COL].isna().any():
+        df = df.dropna(subset=[OUTCOME_COL])
 
-    df["in_hospital_mortality"] = df["in_hospital_mortality"].astype(int)
+    df[OUTCOME_COL] = df[OUTCOME_COL].astype(int)
     print(f"      Finished merge: {len(df):,} patients retained")
     return df
 
 
 def get_feature_columns(df: pd.DataFrame):
     # all columns except id + target
-    return [c for c in df.columns if c not in ["ts_id", "in_hospital_mortality"]]
+    return [c for c in df.columns if c not in ["ts_id", OUTCOME_COL]]
 
 
 # =========================
@@ -286,7 +309,7 @@ def run_mortality_from_latents(
     feat_cols = get_feature_columns(df)
 
     X = df[feat_cols].astype(float).values
-    y = df["in_hospital_mortality"].values.astype(int)
+    y = df[OUTCOME_COL].values.astype(int)
 
     # split: train / temp
     X_train, X_temp, y_train, y_temp = train_test_split(
@@ -368,27 +391,41 @@ def run_mortality_from_latents(
 
 def main():
     global DATASET_MODEL
+    global OUTCOME_COL
     args = parse_args()
     DATASET_MODEL = args.model
-    dataset_defaults = get_dataset_defaults(DATASET_MODEL)
-    if DATASET_MODEL == "mimic" and args.results_txt_path is None:
-        raise ValueError(
-            "MIMIC mode requires --results-txt-path because this repo does not define "
-            "a safe default MIMIC results file and the PhysioNet default would collide."
-        )
+    config = load_dataset_config(DATASET_MODEL, args.dataset_config_csv)
+    OUTCOME_COL = str(get_config_scalar(config, "OUTCOME_COL", OUTCOME_COL))
+    seed = int(get_config_int(config, "SEED", SEED) or SEED)
+
+    latent_tags_default = get_first_available(
+        config,
+        ["MORTALITY_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
+        latent_tags_csv_path,
+    )
+    physionet_pkl_default = get_first_available(
+        config,
+        ["MORTALITY_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
+        physionet_ts_oc_ids_pkl_path,
+    )
+    results_default = get_first_available(
+        config,
+        ["MORTALITY_RESULTS_TXT_PATH", "RESULTS_TXT_PATH"],
+        results_txt_path,
+    )
     latent_path = resolve_runtime_path(
         args.latent_tags_path,
-        dataset_defaults["latent_tags_path"],
+        str(latent_tags_default),
         "LATENT_TAGS_PATH",
     )
     physionet_pkl_path = resolve_runtime_path(
         args.physionet_pkl_path,
-        dataset_defaults["physionet_pkl_path"],
+        str(physionet_pkl_default),
         "PHYSIONET_PKL_PATH",
     )
     results_path = resolve_output_path(
         args.results_txt_path,
-        dataset_defaults["results_txt_path"],
+        str(results_default),
         "RESULTS_TXT_PATH",
     )
     print(
@@ -396,7 +433,12 @@ def main():
         f"model={DATASET_MODEL} | latent_tags_path={latent_path} | "
         f"processed_pkl_path={physionet_pkl_path} | results_txt_path={results_path}"
     )
-    return run_mortality_from_latents(latent_path, physionet_pkl_path, results_path)
+    return run_mortality_from_latents(
+        latent_path,
+        physionet_pkl_path,
+        results_path,
+        seed=seed,
+    )
 
 
 if __name__ == "__main__":
